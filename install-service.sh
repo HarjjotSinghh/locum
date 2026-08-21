@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-TUNNEL="${TUNNEL_NAME:-grok-bridge}"
+TUNNEL="${TUNNEL_NAME:-locum}"
 SRC="${SUDO_USER:+/Users/$SUDO_USER}/.cloudflared"
 DST=/etc/cloudflared
 

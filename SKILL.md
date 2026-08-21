@@ -1,6 +1,6 @@
 # Delegate coding work to the local bridge
 
-Use the `grok-bridge` connector for anything that touches a real repository:
+Use the `locum` connector for anything that touches a real repository:
 multi-file edits, refactors, debugging, test runs, reading large codebases.
 
 The local agent has the whole repo on disk. You do not. Delegating is faster and

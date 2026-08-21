@@ -4,7 +4,7 @@
 # dependencies = ["fastmcp>=2.10", "uvicorn>=0.30"]
 # ///
 """
-grok-bridge - expose the Claude Code and Codex CLIs you are ALREADY logged into
+locum - expose the Claude Code and Codex CLIs you are ALREADY logged into
 on this machine to Grok Bot, as a remote MCP server.
 
 ToS-safety invariants. Do not remove these; they are the reason this is legal:
@@ -40,29 +40,29 @@ from fastmcp import FastMCP
 # ---------------------------------------------------------------- config ----
 
 def _roots() -> list[Path]:
-    raw = os.environ.get("GROK_BRIDGE_ROOTS", str(Path.home() / "Documents" / "Projects"))
+    raw = os.environ.get("LOCUM_ROOTS", str(Path.home() / "Documents" / "Projects"))
     out = []
     for chunk in raw.split(":"):
         chunk = chunk.strip()
         if chunk:
             out.append(Path(chunk).expanduser().resolve())
     if not out:
-        raise SystemExit("GROK_BRIDGE_ROOTS resolved to nothing")
+        raise SystemExit("LOCUM_ROOTS resolved to nothing")
     return out
 
 ROOTS = _roots()
-TOKEN = os.environ.get("GROK_BRIDGE_TOKEN", "")
-HOST = os.environ.get("GROK_BRIDGE_HOST", "127.0.0.1")
-PORT = int(os.environ.get("GROK_BRIDGE_PORT", "8791"))
-PERMISSION_MODE = os.environ.get("GROK_BRIDGE_PERMISSION_MODE", "acceptEdits")
-JOB_TIMEOUT = int(os.environ.get("GROK_BRIDGE_JOB_TIMEOUT", "1800"))
-MAX_CONCURRENT = int(os.environ.get("GROK_BRIDGE_MAX_CONCURRENT", "2"))
+TOKEN = os.environ.get("LOCUM_TOKEN", "")
+HOST = os.environ.get("LOCUM_HOST", "127.0.0.1")
+PORT = int(os.environ.get("LOCUM_PORT", "8791"))
+PERMISSION_MODE = os.environ.get("LOCUM_PERMISSION_MODE", "acceptEdits")
+JOB_TIMEOUT = int(os.environ.get("LOCUM_JOB_TIMEOUT", "1800"))
+MAX_CONCURRENT = int(os.environ.get("LOCUM_MAX_CONCURRENT", "2"))
 
 if not TOKEN:
     raise SystemExit(
-        "GROK_BRIDGE_TOKEN is not set. Pick one and keep it stable -- the Grok\n"
+        "LOCUM_TOKEN is not set. Pick one and keep it stable -- the Grok\n"
         "connector stores it, so regenerating means re-registering.\n\n"
-        f'  export GROK_BRIDGE_TOKEN="{secrets.token_urlsafe(32)}"\n'
+        f'  export LOCUM_TOKEN="{secrets.token_urlsafe(32)}"\n'
     )
 
 # ------------------------------------------------------------------ jobs ----
@@ -174,6 +174,31 @@ def _note_codex_event(job: Job, evt: dict[str, Any]) -> None:
     job.session_id = evt.get("session_id") or evt.get("conversation_id") or job.session_id
 
 
+def _child_env() -> dict[str, str]:
+    """Environment for the spawned CLI.
+
+    Claude Code exports session-scoped plumbing into every child process:
+    CLAUDECODE, a CLAUDE_CODE_* family, and ANTHROPIC_BASE_URL. A `claude`
+    that inherits those believes it is a nested child session and tries to
+    delegate auth to a host socket that is not listening, dying with
+    "Failed to authenticate: OAuth session expired and could not be refreshed".
+
+    Strip them, but only when nesting is actually detected, so that a
+    deliberately set ANTHROPIC_BASE_URL still works outside Claude Code.
+    """
+    env = {**os.environ, "CI": "1", "NO_COLOR": "1"}
+    if not env.get("CLAUDECODE"):
+        return env
+
+    exact = {"CLAUDECODE", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
+             "CLAUDE_EFFORT", "CLAUDE_PID"}
+    prefixes = ("CLAUDE_CODE_", "CLAUDE_AGENT_SDK_", "CLAUDE_PREVIEW_")
+    return {
+        k: v for k, v in env.items()
+        if k not in exact and not k.startswith(prefixes)
+    }
+
+
 async def _run(job: Job, argv: list[str], on_event, finalize=None) -> None:
     async with SEM:
         try:
@@ -184,7 +209,7 @@ async def _run(job: Job, argv: list[str], on_event, finalize=None) -> None:
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.DEVNULL,
                 limit=32 * 1024 * 1024,   # stream-json lines carry whole file reads
-                env={**os.environ, "CI": "1", "NO_COLOR": "1"},
+                env=_child_env(),
             )
             job.proc = proc
 
@@ -215,7 +240,7 @@ async def _run(job: Job, argv: list[str], on_event, finalize=None) -> None:
                     job.error = f"{job.kind} exited {rc}"
         except asyncio.TimeoutError:
             job.status = "timeout"
-            job.error = f"exceeded GROK_BRIDGE_JOB_TIMEOUT ({JOB_TIMEOUT}s)"
+            job.error = f"exceeded LOCUM_JOB_TIMEOUT ({JOB_TIMEOUT}s)"
             if job.proc and job.proc.returncode is None:
                 job.proc.kill()
         except asyncio.CancelledError:
@@ -246,7 +271,7 @@ def _spawn(job: Job, argv: list[str], on_event, finalize=None) -> dict[str, Any]
 # ------------------------------------------------------------------ tools ----
 
 mcp = FastMCP(
-    name="grok-bridge",
+    name="locum",
     instructions=(
         "Delegates coding work to the operator's own local Claude Code and Codex "
         "CLIs. Prefer these tools over doing multi-file code work yourself: they "
@@ -367,7 +392,7 @@ async def cancel_job(job_id: str) -> dict:
 # Grok Bot's custom-connector dialog only speaks OAuth 2.1 -- it offers no static
 # header field. So the bridge ships a minimal, single-operator authorization
 # server: discovery metadata, dynamic client registration, a PKCE authorization
-# code flow, and a consent screen gated on GROK_BRIDGE_TOKEN.
+# code flow, and a consent screen gated on LOCUM_TOKEN.
 #
 # The passphrase gate is load-bearing. /authorize sits on a public tunnel;
 # without it, anyone who learned the URL could mint a token for themselves and
@@ -391,7 +416,7 @@ CLIENTS: dict[str, dict[str, Any]] = {}
 TOKEN_TTL = 30 * 24 * 3600
 
 CONSENT_PAGE = """<!doctype html><meta charset=utf-8>
-<title>grok-bridge - authorize</title>
+<title>locum - authorize</title>
 <style>
  body{{background:#0b0b0d;color:#e7e7ea;font:15px/1.55 -apple-system,system-ui,sans-serif;
       display:grid;place-items:center;min-height:100vh;margin:0}}
@@ -406,7 +431,7 @@ CONSENT_PAGE = """<!doctype html><meta charset=utf-8>
  .e{{color:#ff8f8f;font-size:13px;margin:0 0 12px}}
 </style>
 <div class=c>
- <h1>Authorize grok-bridge</h1>
+ <h1>Authorize locum</h1>
  <p>This grants shell-level access to your allowed workspace roots. Check the
     redirect target below before approving.</p>
  <dl><dt>client</dt><dd>{client}</dd>
@@ -415,7 +440,7 @@ CONSENT_PAGE = """<!doctype html><meta charset=utf-8>
  {error}
  <form method=post>
   {hidden}
-  <input type=password name=passphrase placeholder="GROK_BRIDGE_TOKEN" autofocus required>
+  <input type=password name=passphrase placeholder="LOCUM_TOKEN" autofocus required>
   <button type=submit>Approve</button>
  </form>
 </div>"""
@@ -451,7 +476,7 @@ class AuthGateway:
 
     @staticmethod
     def _base(scope) -> str:
-        if forced := os.environ.get("GROK_BRIDGE_PUBLIC_URL"):
+        if forced := os.environ.get("LOCUM_PUBLIC_URL"):
             return forced.rstrip("/")
         headers = dict(scope.get("headers") or {})
         host = headers.get(b"host", b"localhost").decode()
@@ -500,7 +525,7 @@ class AuthGateway:
                 req = json.loads(await self._body(receive) or b"{}")
             except json.JSONDecodeError:
                 req = {}
-            cid = f"grok-bridge-{secrets.token_hex(8)}"
+            cid = f"locum-{secrets.token_hex(8)}"
             CLIENTS[cid] = req
             return await self._json(send, 201, {
                 "client_id": cid,
@@ -509,7 +534,7 @@ class AuthGateway:
                 "grant_types": ["authorization_code", "refresh_token"],
                 "response_types": ["code"],
                 "redirect_uris": req.get("redirect_uris", []),
-                "client_name": req.get("client_name", "grok-bridge client"),
+                "client_name": req.get("client_name", "locum client"),
             })
 
         if path == "/authorize":
@@ -523,7 +548,7 @@ class AuthGateway:
             return await self._json(
                 send, 401, {"error": "unauthorized"},
                 extra=[(b"www-authenticate",
-                        f'Bearer realm="grok-bridge", '
+                        f'Bearer realm="locum", '
                         f'resource_metadata="{base}/.well-known/oauth-protected-resource"'
                         .encode())])
         return await self.app(scope, receive, send)
@@ -558,7 +583,7 @@ class AuthGateway:
                     target += f"&state={quote(state)}"
                 return await self._send(send, 302, b"", "text/plain",
                                         extra=[(b"location", target.encode())])
-            error = '<p class="e">Wrong passphrase. It is GROK_BRIDGE_TOKEN from your .env.</p>'
+            error = '<p class="e">Wrong passphrase. It is LOCUM_TOKEN from your .env.</p>'
 
         if params.get("code_challenge_method", "S256") != "S256":
             return await self._json(send, 400, {"error": "invalid_request",
@@ -608,7 +633,7 @@ class AuthGateway:
 if __name__ == "__main__":
     import uvicorn
 
-    print(f"grok-bridge  http://{HOST}:{PORT}/mcp")
+    print(f"locum  http://{HOST}:{PORT}/mcp")
     print(f"  roots           : {', '.join(str(r) for r in ROOTS)}")
     print(f"  permission mode : {PERMISSION_MODE}")
     print(f"  job timeout     : {JOB_TIMEOUT}s, max concurrent {MAX_CONCURRENT}")

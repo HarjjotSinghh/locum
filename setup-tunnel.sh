@@ -10,8 +10,8 @@
 set -euo pipefail
 
 HOSTNAME="${1:-}"
-TUNNEL="${TUNNEL_NAME:-grok-bridge}"
-PORT="${GROK_BRIDGE_PORT:-8791}"
+TUNNEL="${TUNNEL_NAME:-locum}"
+PORT="${LOCUM_PORT:-8791}"
 CFDIR="$HOME/.cloudflared"
 
 die() { printf '\n%s\n\n' "$*" >&2; exit 1; }
@@ -65,10 +65,10 @@ Then re-register the Grok connector at grok.com/connectors with:
     https://$HOSTNAME/mcp
 
 This is the last time you have to re-register -- the hostname is stable now.
-Consent again with your GROK_BRIDGE_TOKEN when prompted.
+Consent again with your LOCUM_TOKEN when prompted.
 
 Optional, pins the OAuth issuer to the stable host:
 
-    echo 'GROK_BRIDGE_PUBLIC_URL=https://$HOSTNAME' >> .env
+    echo 'LOCUM_PUBLIC_URL=https://$HOSTNAME' >> .env
 
 DONE

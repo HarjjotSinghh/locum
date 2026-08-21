@@ -1,4 +1,4 @@
-"""Exercise the grok-bridge OAuth flow exactly as an MCP client would."""
+"""Exercise the locum OAuth flow exactly as an MCP client would."""
 import base64, hashlib, json, secrets, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 
 BASE, TOK = "http://127.0.0.1:8799", "smoketest-token"
@@ -31,7 +31,7 @@ def ok(label, cond, extra=""):
 proc = subprocess.Popen(
     ["uv", "run", "server.py"],
     cwd=str(__import__("pathlib").Path(__file__).parent),
-    env={**__import__("os").environ, "GROK_BRIDGE_TOKEN": TOK, "GROK_BRIDGE_PORT": "8799"},
+    env={**__import__("os").environ, "LOCUM_TOKEN": TOK, "LOCUM_PORT": "8799"},
     stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
 )
 for _ in range(60):
@@ -59,7 +59,7 @@ try:
     s, _, b = call("/register", data=json.dumps({"client_name": "Grok", "redirect_uris": [REDIRECT]}).encode(),
                    headers={"Content-Type": "application/json"}, method="POST")
     cid = json.loads(b).get("client_id", "")
-    results.append(ok("client registered", s == 201 and cid.startswith("grok-bridge-"), cid))
+    results.append(ok("client registered", s == 201 and cid.startswith("locum-"), cid))
 
     verifier = secrets.token_urlsafe(64)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
@@ -69,7 +69,7 @@ try:
 
     print("\n4. consent screen")
     s, _, b = call(f"/authorize?{q}")
-    results.append(ok("renders consent form", s == 200 and "GROK_BRIDGE_TOKEN" in b))
+    results.append(ok("renders consent form", s == 200 and "LOCUM_TOKEN" in b))
     results.append(ok("shows redirect target to operator", "grok.com" in b))
 
     print("\n5. wrong passphrase is rejected")
@@ -109,7 +109,7 @@ try:
     s, _, b = call("/mcp", data=payload, method="POST",
                    headers={"Authorization": f"Bearer {access}", "Content-Type": "application/json",
                             "Accept": "application/json, text/event-stream"})
-    results.append(ok("initialize succeeds", s == 200 and "grok-bridge" in b))
+    results.append(ok("initialize succeeds", s == 200 and "locum" in b))
 
     print("\n11. refresh token works")
     s, _, b = call("/token", data={"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"]})

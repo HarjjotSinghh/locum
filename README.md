@@ -1,4 +1,4 @@
-# grok-bridge
+# locum
 
 Lets Grok Bot delegate coding work to the Claude Code and Codex CLIs you are
 already logged into on your own machine, instead of burning Grok Bot usage on
@@ -60,7 +60,7 @@ Streamable HTTP, so they work fine):
 
 ```bash
 brew install cloudflared
-cloudflared tunnel --url http://localhost:8787
+cloudflared tunnel --url http://127.0.0.1:8791
 ```
 
 That quick tunnel is fine for a first run, but it hands out a new hostname on
@@ -70,8 +70,8 @@ already on your Cloudflare account):
 
 ```bash
 cloudflared tunnel login          # browser, once
-./setup-tunnel.sh bridge.example.com
-cloudflared tunnel run grok-bridge
+./setup-tunnel.sh locum.example.com
+cloudflared tunnel run locum
 ```
 
 `setup-tunnel.sh` is idempotent: it creates the named tunnel if missing, points
@@ -90,7 +90,7 @@ If Grok still shows the manual "OAuth Credentials Required" form, fill it as:
 
 | Field | Value |
 |---|---|
-| Client ID | anything, e.g. `grok-bridge` |
+| Client ID | anything, e.g. `locum` |
 | Client Secret | leave empty |
 | Authorization Endpoint | `https://<tunnel>/authorize` |
 | Token Endpoint | `https://<tunnel>/token` |
@@ -99,13 +99,13 @@ If Grok still shows the manual "OAuth Credentials Required" form, fill it as:
 
 You'll then get a consent screen. It shows the redirect target -- check it says
 `grok.com` before approving -- and asks for a passphrase: paste your
-`GROK_BRIDGE_TOKEN`.
+`LOCUM_TOKEN`.
 
 That passphrase gate is load-bearing. `/authorize` sits on a public tunnel;
 without it, anyone who learned the URL could mint a token and get shell access
 to your machine.
 
-Finally, paste `GROK_SKILL.md` into a Grok Bot Skill. Without it the Bot keeps
+Finally, paste `SKILL.md` into a Grok Bot Skill. Without it the Bot keeps
 grinding through its own loop and you save nothing.
 
 ## Tests
@@ -134,14 +134,14 @@ thing that makes the integration work at all.
 
 ## Safety
 
-`GROK_BRIDGE_ROOTS` is the only barrier between a cloud agent and your home
-directory. Keep it narrow. Never set `GROK_BRIDGE_PERMISSION_MODE=bypassPermissions`
+`LOCUM_ROOTS` is the only barrier between a cloud agent and your home
+directory. Keep it narrow. Never set `LOCUM_PERMISSION_MODE=bypassPermissions`
 while a tunnel is open.
 
 Every token comparison uses `hmac.compare_digest`. Authorization codes are
 single-use and expire in 120s. PKCE `S256` is required -- `plain` is refused.
 `/health` and the discovery documents are the only unauthenticated routes;
-`GROK_BRIDGE_TOKEN` itself also remains a valid bearer token, which is what makes
+`LOCUM_TOKEN` itself also remains a valid bearer token, which is what makes
 `curl` smoke tests work.
 
 ## Troubleshooting
@@ -162,6 +162,25 @@ curl -s http://localhost:<port>/health # if this differs, you have a collision
 `cloudflared --loglevel debug tunnel run <name>` settles it: each request logs
 `ingressRule=` and `originService=`, so you can see whether the 404 came from
 cloudflared's catch-all or from whatever is actually on the port.
+
+**Jobs fail with "OAuth session expired and could not be refreshed".** The
+server was launched from inside a Claude Code session. Claude Code exports
+`CLAUDECODE`, a `CLAUDE_CODE_*` family, and `ANTHROPIC_BASE_URL` into every
+child process; a `claude` that inherits them believes it is a nested child
+session and tries to delegate auth to a host socket that is not listening.
+`_child_env()` strips those when nesting is detected, but some sandboxed hosts
+broker Claude's credentials entirely in-process, and there a spawned `claude`
+has nothing on disk to authenticate with no matter what the environment says.
+Run the server from an ordinary terminal.
+
+**Cloudflare returns 403 with `error code: 1010`.** Cloudflare bans the default
+`Python-urllib` User-Agent signature. Only that signature -- curl, Go, Node,
+okhttp, and an absent User-Agent all pass, so MCP clients are unaffected. Set a
+User-Agent on any Python tooling you point at the tunnel:
+
+```python
+urllib.request.Request(url, headers={"User-Agent": "locum-check/1.0"})
+```
 
 ## Honest limits
 
