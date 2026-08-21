@@ -47,12 +47,44 @@ sed -i '' "s|^credentials-file:.*|credentials-file: $DST/$ID.json|" "$DST/config
 echo "==> validating ingress from $DST/config.yml"
 cloudflared --config "$DST/config.yml" tunnel ingress validate
 
-echo "==> installing the daemon"
-cloudflared --config "$DST/config.yml" service install
+BIN=$(command -v cloudflared)
+PLIST=/Library/LaunchDaemons/com.cloudflare.cloudflared.plist
 
-sleep 3
-launchctl kickstart -k system/com.cloudflare.cloudflared 2>/dev/null || true
-sleep 3
+# `cloudflared service install` writes ProgramArguments containing only the
+# binary path, with no subcommand, on every version tested. Bare `cloudflared`
+# just prints "use `cloudflared tunnel run` to start tunnel <id>" and exits 1,
+# so launchd crash-loops it forever on the 5s ThrottleInterval. Passing
+# --config to the installer does not change what it writes. Writing the plist
+# directly is the only thing that actually produces a running daemon.
+echo "==> writing $PLIST"
+cat > "$PLIST" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.cloudflare.cloudflared</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$BIN</string>
+    <string>--config</string><string>$DST/config.yml</string>
+    <string>--no-autoupdate</string>
+    <string>tunnel</string><string>run</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Library/Logs/com.cloudflare.cloudflared.out.log</string>
+  <key>StandardErrorPath</key><string>/Library/Logs/com.cloudflare.cloudflared.err.log</string>
+  <key>ThrottleInterval</key><integer>5</integer>
+</dict>
+</plist>
+PLISTEOF
+chmod 0644 "$PLIST"
+plutil -lint "$PLIST" >/dev/null
+
+echo "==> loading the daemon"
+launchctl bootout system/com.cloudflare.cloudflared 2>/dev/null || true
+launchctl bootstrap system "$PLIST"
+sleep 4
 
 echo
 echo "ProgramArguments (must include 'tunnel' and 'run', not just the binary):"
