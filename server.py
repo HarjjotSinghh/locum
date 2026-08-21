@@ -19,6 +19,8 @@ ToS-safety invariants. Do not remove these; they are the reason this is legal:
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import hmac
 import json
 import os
@@ -28,8 +30,10 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from html import escape
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, quote
 
 from fastmcp import FastMCP
 
@@ -360,30 +364,245 @@ async def cancel_job(job_id: str) -> dict:
     return {"job_id": job_id, "status": job.status, "note": "job was not running"}
 
 # ------------------------------------------------------------------- auth ----
+# Grok Bot's custom-connector dialog only speaks OAuth 2.1 -- it offers no static
+# header field. So the bridge ships a minimal, single-operator authorization
+# server: discovery metadata, dynamic client registration, a PKCE authorization
+# code flow, and a consent screen gated on GROK_BRIDGE_TOKEN.
+#
+# The passphrase gate is load-bearing. /authorize sits on a public tunnel;
+# without it, anyone who learned the URL could mint a token for themselves and
+# get shell access to this machine.
 
-class BearerAuth:
-    """Minimal ASGI guard. Deliberately not using a framework auth plugin so it
-    cannot silently change behaviour across FastMCP versions."""
+def _b64u(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+@dataclass
+class AuthCode:
+    challenge: str
+    redirect_uri: str
+    expires: float
+
+
+CODES: dict[str, AuthCode] = {}
+ACCESS: dict[str, float] = {}          # token -> expiry
+REFRESH: set[str] = set()
+CLIENTS: dict[str, dict[str, Any]] = {}
+TOKEN_TTL = 30 * 24 * 3600
+
+CONSENT_PAGE = """<!doctype html><meta charset=utf-8>
+<title>grok-bridge - authorize</title>
+<style>
+ body{{background:#0b0b0d;color:#e7e7ea;font:15px/1.55 -apple-system,system-ui,sans-serif;
+      display:grid;place-items:center;min-height:100vh;margin:0}}
+ .c{{width:min(440px,90vw);background:#141417;border:1px solid #2a2a30;border-radius:14px;padding:28px}}
+ h1{{font-size:17px;margin:0 0 4px}} p{{color:#9a9aa4;margin:0 0 18px;font-size:13px}}
+ dl{{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:12.5px;margin:0 0 20px}}
+ dt{{color:#7a7a85}} dd{{margin:0;word-break:break-all;font-family:ui-monospace,monospace}}
+ input{{width:100%;box-sizing:border-box;background:#0b0b0d;border:1px solid #33333b;color:#e7e7ea;
+        border-radius:9px;padding:11px 13px;font:inherit;margin:0 0 12px}}
+ button{{width:100%;background:#e7e7ea;color:#0b0b0d;border:0;border-radius:9px;
+         padding:11px;font:600 15px/1 inherit;cursor:pointer}}
+ .e{{color:#ff8f8f;font-size:13px;margin:0 0 12px}}
+</style>
+<div class=c>
+ <h1>Authorize grok-bridge</h1>
+ <p>This grants shell-level access to your allowed workspace roots. Check the
+    redirect target below before approving.</p>
+ <dl><dt>client</dt><dd>{client}</dd>
+     <dt>redirect</dt><dd>{redirect}</dd>
+     <dt>roots</dt><dd>{roots}</dd></dl>
+ {error}
+ <form method=post>
+  {hidden}
+  <input type=password name=passphrase placeholder="GROK_BRIDGE_TOKEN" autofocus required>
+  <button type=submit>Approve</button>
+ </form>
+</div>"""
+
+
+class AuthGateway:
+    """Wraps the MCP app: OAuth endpoints in front, bearer enforcement behind."""
 
     def __init__(self, app, token: str) -> None:
-        self.app, self.expected = app, f"Bearer {token}"
+        self.app, self.token = app, token
 
+    # -- plumbing ---------------------------------------------------------
+    @staticmethod
+    async def _send(send, status: int, body: bytes, ctype: str, extra=()) -> None:
+        headers = [(b"content-type", ctype.encode()),
+                   (b"content-length", str(len(body)).encode()),
+                   (b"cache-control", b"no-store")]
+        headers.extend(extra)
+        await send({"type": "http.response.start", "status": status, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
+
+    async def _json(self, send, status: int, payload: dict, extra=()) -> None:
+        await self._send(send, status, json.dumps(payload).encode(), "application/json", extra)
+
+    @staticmethod
+    async def _body(receive) -> bytes:
+        buf, more = b"", True
+        while more:
+            msg = await receive()
+            buf += msg.get("body", b"")
+            more = msg.get("more_body", False)
+        return buf
+
+    @staticmethod
+    def _base(scope) -> str:
+        if forced := os.environ.get("GROK_BRIDGE_PUBLIC_URL"):
+            return forced.rstrip("/")
+        headers = dict(scope.get("headers") or {})
+        host = headers.get(b"host", b"localhost").decode()
+        proto = headers.get(b"x-forwarded-proto", b"").decode() or (
+            "http" if host.startswith(("localhost", "127.")) else "https")
+        return f"{proto}://{host}"
+
+    # -- routing ----------------------------------------------------------
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
-        if scope.get("path") == "/health":
-            return await self._text(send, 200, b'{"ok":true}')
+
+        path, method = scope.get("path", ""), scope.get("method", "GET")
+        base = self._base(scope)
+
+        if path == "/health":
+            return await self._json(send, 200, {"ok": True})
+
+        # Clients probe both the bare and resource-suffixed discovery paths.
+        if path.startswith("/.well-known/oauth-protected-resource"):
+            return await self._json(send, 200, {
+                "resource": f"{base}/mcp",
+                "authorization_servers": [base],
+                "scopes_supported": ["mcp"],
+                "bearer_methods_supported": ["header"],
+            })
+
+        if path.startswith(("/.well-known/oauth-authorization-server",
+                            "/.well-known/openid-configuration")):
+            return await self._json(send, 200, {
+                "issuer": base,
+                "authorization_endpoint": f"{base}/authorize",
+                "token_endpoint": f"{base}/token",
+                "registration_endpoint": f"{base}/register",
+                "response_types_supported": ["code"],
+                "grant_types_supported": ["authorization_code", "refresh_token"],
+                "code_challenge_methods_supported": ["S256"],
+                "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
+                "scopes_supported": ["mcp"],
+            })
+
+        # RFC 7591 dynamic registration, so Grok can self-register rather than
+        # making the operator hand-copy a client id.
+        if path == "/register" and method == "POST":
+            try:
+                req = json.loads(await self._body(receive) or b"{}")
+            except json.JSONDecodeError:
+                req = {}
+            cid = f"grok-bridge-{secrets.token_hex(8)}"
+            CLIENTS[cid] = req
+            return await self._json(send, 201, {
+                "client_id": cid,
+                "client_id_issued_at": int(time.time()),
+                "token_endpoint_auth_method": "none",
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "redirect_uris": req.get("redirect_uris", []),
+                "client_name": req.get("client_name", "grok-bridge client"),
+            })
+
+        if path == "/authorize":
+            return await self._authorize(scope, receive, send, method)
+
+        if path == "/token" and method == "POST":
+            return await self._token(receive, send)
+
         header = dict(scope.get("headers") or {}).get(b"authorization", b"").decode()
-        if not hmac.compare_digest(header, self.expected):
-            return await self._text(send, 401, b'{"error":"unauthorized"}')
+        if not self._authorized(header):
+            return await self._json(
+                send, 401, {"error": "unauthorized"},
+                extra=[(b"www-authenticate",
+                        f'Bearer realm="grok-bridge", '
+                        f'resource_metadata="{base}/.well-known/oauth-protected-resource"'
+                        .encode())])
         return await self.app(scope, receive, send)
 
-    @staticmethod
-    async def _text(send, status: int, body: bytes) -> None:
-        await send({"type": "http.response.start", "status": status,
-                    "headers": [(b"content-type", b"application/json"),
-                                (b"content-length", str(len(body)).encode())]})
-        await send({"type": "http.response.body", "body": body})
+    def _authorized(self, header: str) -> bool:
+        if not header.startswith("Bearer "):
+            return False
+        presented = header[7:]
+        # The static token stays valid: it is the same secret that gates consent,
+        # and it keeps curl smoke tests working.
+        if hmac.compare_digest(presented, self.token):
+            return True
+        expiry = ACCESS.get(presented)
+        return bool(expiry and expiry > time.time())
+
+    async def _authorize(self, scope, receive, send, method: str):
+        params = dict(parse_qsl(scope.get("query_string", b"").decode()))
+        error = ""
+
+        if method == "POST":
+            form = dict(parse_qsl((await self._body(receive)).decode()))
+            params = {**params, **form}
+            if hmac.compare_digest(form.get("passphrase", ""), self.token):
+                redirect_uri = params.get("redirect_uri", "")
+                code = secrets.token_urlsafe(32)
+                CODES[code] = AuthCode(challenge=params.get("code_challenge", ""),
+                                       redirect_uri=redirect_uri,
+                                       expires=time.time() + 120)
+                sep = "&" if "?" in redirect_uri else "?"
+                target = f"{redirect_uri}{sep}code={quote(code)}"
+                if state := params.get("state"):
+                    target += f"&state={quote(state)}"
+                return await self._send(send, 302, b"", "text/plain",
+                                        extra=[(b"location", target.encode())])
+            error = '<p class="e">Wrong passphrase. It is GROK_BRIDGE_TOKEN from your .env.</p>'
+
+        if params.get("code_challenge_method", "S256") != "S256":
+            return await self._json(send, 400, {"error": "invalid_request",
+                                                "error_description": "S256 PKCE required"})
+
+        hidden = "".join(
+            f'<input type=hidden name="{escape(k, True)}" value="{escape(v, True)}">'
+            for k, v in params.items() if k != "passphrase")
+        page = CONSENT_PAGE.format(
+            client=escape(params.get("client_id", "(none)")),
+            redirect=escape(params.get("redirect_uri", "(none)")),
+            roots=escape(", ".join(str(r) for r in ROOTS)),
+            error=error, hidden=hidden)
+        return await self._send(send, 200, page.encode(), "text/html; charset=utf-8")
+
+    async def _token(self, receive, send):
+        form = dict(parse_qsl((await self._body(receive)).decode()))
+        grant = form.get("grant_type")
+
+        if grant == "refresh_token":
+            if form.get("refresh_token") not in REFRESH:
+                return await self._json(send, 400, {"error": "invalid_grant"})
+        elif grant == "authorization_code":
+            entry = CODES.pop(form.get("code", ""), None)
+            if not entry or entry.expires < time.time():
+                return await self._json(send, 400, {"error": "invalid_grant",
+                                                    "error_description": "code expired or unknown"})
+            digest = _b64u(hashlib.sha256(form.get("code_verifier", "").encode()).digest())
+            if not entry.challenge or not hmac.compare_digest(digest, entry.challenge):
+                return await self._json(send, 400, {"error": "invalid_grant",
+                                                    "error_description": "PKCE verification failed"})
+        else:
+            return await self._json(send, 400, {"error": "unsupported_grant_type"})
+
+        access, refresh = secrets.token_urlsafe(40), secrets.token_urlsafe(40)
+        ACCESS[access] = time.time() + TOKEN_TTL
+        REFRESH.add(refresh)
+        for tok, exp in list(ACCESS.items()):          # opportunistic sweep
+            if exp < time.time():
+                ACCESS.pop(tok, None)
+        return await self._json(send, 200, {
+            "access_token": access, "token_type": "Bearer",
+            "expires_in": TOKEN_TTL, "refresh_token": refresh, "scope": "mcp",
+        })
 
 
 if __name__ == "__main__":
@@ -393,5 +612,6 @@ if __name__ == "__main__":
     print(f"  roots           : {', '.join(str(r) for r in ROOTS)}")
     print(f"  permission mode : {PERMISSION_MODE}")
     print(f"  job timeout     : {JOB_TIMEOUT}s, max concurrent {MAX_CONCURRENT}")
-    uvicorn.run(BearerAuth(mcp.http_app(path="/mcp"), TOKEN),
+    print("  oauth           : /authorize /token /register + discovery")
+    uvicorn.run(AuthGateway(mcp.http_app(path="/mcp"), TOKEN),
                 host=HOST, port=PORT, log_level="info")

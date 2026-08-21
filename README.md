@@ -63,13 +63,45 @@ brew install cloudflared
 cloudflared tunnel --url http://localhost:8787
 ```
 
-Register at `grok.com/connectors` -> **New Connector** -> **Custom**:
+Register at `grok.com/connectors` -> **New Connector** -> **Custom**, with the
+tunnel URL plus `/mcp`.
 
-- URL: `https://<your-tunnel>.trycloudflare.com/mcp`
-- Auth header: `Authorization: Bearer <GROK_BRIDGE_TOKEN>`
+Grok's custom connectors speak **OAuth 2.1 only** -- the dialog has no static
+header field. The bridge therefore ships its own minimal authorization server,
+so there is no third-party OAuth app to create. Grok discovers the endpoints via
+`/.well-known/oauth-authorization-server` and self-registers over RFC 7591.
 
-Then paste `GROK_SKILL.md` into a Grok Bot Skill. Without it the Bot keeps
+If Grok still shows the manual "OAuth Credentials Required" form, fill it as:
+
+| Field | Value |
+|---|---|
+| Client ID | anything, e.g. `grok-bridge` |
+| Client Secret | leave empty |
+| Authorization Endpoint | `https://<tunnel>/authorize` |
+| Token Endpoint | `https://<tunnel>/token` |
+| Scopes | `mcp` |
+| Token Auth Method | `none (PKCE only)` |
+
+You'll then get a consent screen. It shows the redirect target -- check it says
+`grok.com` before approving -- and asks for a passphrase: paste your
+`GROK_BRIDGE_TOKEN`.
+
+That passphrase gate is load-bearing. `/authorize` sits on a public tunnel;
+without it, anyone who learned the URL could mint a token and get shell access
+to your machine.
+
+Finally, paste `GROK_SKILL.md` into a Grok Bot Skill. Without it the Bot keeps
 grinding through its own loop and you save nothing.
+
+## Tests
+
+```bash
+python3 test_oauth.py
+```
+
+Boots a throwaway instance on port 8799 and exercises discovery, dynamic
+registration, the consent gate, PKCE enforcement, single-use codes, token
+exchange, refresh, and an authenticated MCP `initialize`. 13 assertions.
 
 ## Tools
 
@@ -89,8 +121,13 @@ thing that makes the integration work at all.
 
 `GROK_BRIDGE_ROOTS` is the only barrier between a cloud agent and your home
 directory. Keep it narrow. Never set `GROK_BRIDGE_PERMISSION_MODE=bypassPermissions`
-while a tunnel is open. The bearer token is checked with a constant-time compare
-on every request; `/health` is the only unauthenticated route.
+while a tunnel is open.
+
+Every token comparison uses `hmac.compare_digest`. Authorization codes are
+single-use and expire in 120s. PKCE `S256` is required -- `plain` is refused.
+`/health` and the discovery documents are the only unauthenticated routes;
+`GROK_BRIDGE_TOKEN` itself also remains a valid bearer token, which is what makes
+`curl` smoke tests work.
 
 ## Honest limits
 
