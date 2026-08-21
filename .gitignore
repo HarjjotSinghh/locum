@@ -1,5 +1,5 @@
-.env
 *.log
 .codex-last-*.txt
-__pycache__/
+.env
 .venv/
+__pycache__/
