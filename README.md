@@ -63,6 +63,21 @@ brew install cloudflared
 cloudflared tunnel --url http://localhost:8787
 ```
 
+That quick tunnel is fine for a first run, but it hands out a new hostname on
+every restart and Grok stores the URL -- so you would re-register and re-consent
+every time. For anything ongoing, take a stable hostname instead (needs a domain
+already on your Cloudflare account):
+
+```bash
+cloudflared tunnel login          # browser, once
+./setup-tunnel.sh bridge.example.com
+cloudflared tunnel run grok-bridge
+```
+
+`setup-tunnel.sh` is idempotent: it creates the named tunnel if missing, points
+DNS at it, and writes `~/.cloudflared/config.yml`. To keep it up across reboots,
+`sudo cloudflared service install`.
+
 Register at `grok.com/connectors` -> **New Connector** -> **Custom**, with the
 tunnel URL plus `/mcp`.
 
@@ -134,7 +149,7 @@ single-use and expire in 120s. PKCE `S256` is required -- `plain` is refused.
 - Cuts Grok Bot usage, does not zero it -- orchestration turns still meter. The
   win is collapsing ~50 Bot steps into one tool call plus a few polls.
 - Your machine must be awake with the tunnel up.
-- Quick-tunnel URLs change on restart; use a named Cloudflare tunnel for a
-  stable one.
+- Quick-tunnel URLs change on restart; `./setup-tunnel.sh` gives you a stable
+  hostname so the connector survives.
 - Cold delegation re-pays ~18k tokens of `CLAUDE.md` + system prompt setup.
   `resume_claude` avoids it.
