@@ -53,7 +53,7 @@ def _roots() -> list[Path]:
 ROOTS = _roots()
 TOKEN = os.environ.get("GROK_BRIDGE_TOKEN", "")
 HOST = os.environ.get("GROK_BRIDGE_HOST", "127.0.0.1")
-PORT = int(os.environ.get("GROK_BRIDGE_PORT", "8787"))
+PORT = int(os.environ.get("GROK_BRIDGE_PORT", "8791"))
 PERMISSION_MODE = os.environ.get("GROK_BRIDGE_PERMISSION_MODE", "acceptEdits")
 JOB_TIMEOUT = int(os.environ.get("GROK_BRIDGE_JOB_TIMEOUT", "1800"))
 MAX_CONCURRENT = int(os.environ.get("GROK_BRIDGE_MAX_CONCURRENT", "2"))

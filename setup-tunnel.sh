@@ -11,7 +11,7 @@ set -euo pipefail
 
 HOSTNAME="${1:-}"
 TUNNEL="${TUNNEL_NAME:-grok-bridge}"
-PORT="${GROK_BRIDGE_PORT:-8787}"
+PORT="${GROK_BRIDGE_PORT:-8791}"
 CFDIR="$HOME/.cloudflared"
 
 die() { printf '\n%s\n\n' "$*" >&2; exit 1; }
@@ -45,7 +45,7 @@ credentials-file: $CFDIR/$ID.json
 
 ingress:
   - hostname: $HOSTNAME
-    service: http://localhost:$PORT
+    service: http://127.0.0.1:$PORT
   - service: http_status:404
 YAML
 

@@ -144,6 +144,25 @@ single-use and expire in 120s. PKCE `S256` is required -- `plain` is refused.
 `GROK_BRIDGE_TOKEN` itself also remains a valid bearer token, which is what makes
 `curl` smoke tests work.
 
+## Troubleshooting
+
+**Everything 404s, including `/health`, but the tunnel says it is connected.**
+Port collision. The Grok Bot desktop app listens on `[::1]:8787`, and macOS
+resolves `localhost` to `::1` before `127.0.0.1` -- so an ingress pointed at
+`http://localhost:8787` silently reaches Grok Bot instead of the bridge, and
+Grok Bot answers `Not found.` This is why the default port is **8791** and why
+the ingress rule uses `127.0.0.1`, never `localhost`. To confirm:
+
+```bash
+lsof -nP -iTCP:<port> -sTCP:LISTEN     # who actually owns the port
+curl -s http://127.0.0.1:<port>/health # bridge answers {"ok": true}
+curl -s http://localhost:<port>/health # if this differs, you have a collision
+```
+
+`cloudflared --loglevel debug tunnel run <name>` settles it: each request logs
+`ingressRule=` and `originService=`, so you can see whether the 404 came from
+cloudflared's catch-all or from whatever is actually on the port.
+
 ## Honest limits
 
 - Cuts Grok Bot usage, does not zero it -- orchestration turns still meter. The
