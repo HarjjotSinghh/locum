@@ -1,0 +1,5 @@
+.env
+*.log
+.codex-last-*.txt
+__pycache__/
+.venv/
