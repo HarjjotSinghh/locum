@@ -1,0 +1,15 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/HarjjotSinghh/locum/security/advisories/new
+    about: >
+      Locum grants shell access inside your workspace roots. Report anything
+      exploitable privately, never as a public issue.
+  - name: Troubleshooting
+    url: https://github.com/HarjjotSinghh/locum#troubleshooting
+    about: >
+      Port collisions, launch daemons that install themselves broken, and
+      nested-session auth failures all present as "everything returns 404".
+  - name: How it works
+    url: https://www.harjotrana.com/blog/locum-grok-bot-provider-adapter
+    about: Architecture, the credential boundary, and the async job model.

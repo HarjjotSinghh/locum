@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # server.py declares its dependencies inline with PEP 723, so there is no
+  # manifest for Dependabot to read. Actions are the only thing it can pin here.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

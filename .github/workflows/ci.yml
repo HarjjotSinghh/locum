@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Byte-compile
+        run: python -m compileall -q server.py test_oauth.py
+
+      - name: Shell syntax
+        run: bash -n setup-tunnel.sh install-service.sh
+
+      - name: Refuse to start without a token
+        run: |
+          if LOCUM_TOKEN= uv run server.py 2>&1 | grep -q "LOCUM_TOKEN is not set"; then
+            echo "ok: server refuses to boot unauthenticated"
+          else
+            echo "server did not refuse to start without LOCUM_TOKEN"; exit 1
+          fi
+
+      # Covers discovery, dynamic registration, the consent gate, PKCE
+      # enforcement, code replay, token exchange, refresh, and an authenticated
+      # MCP initialize. Does not need `claude` installed: no delegation runs.
+      - name: OAuth suite
+        env:
+          LOCUM_ROOTS: ${{ github.workspace }}
+        run: python3 test_oauth.py
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A committed .env would leak the consent passphrase, which is the single
+      # control standing between a public tunnel and shell access.
+      - name: No committed .env
+        run: |
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo ".env is tracked; it must stay gitignored"; exit 1
+          fi
+          echo "ok: .env is not tracked"
+
+      # Matching the hostnames as strings would flag the invariant docstring at
+      # the top of server.py, so assert the behaviour instead: the server makes
+      # no outbound HTTP calls of any kind. Only the spawned CLIs talk to a
+      # vendor, using their own credentials.
+      - name: No outbound HTTP client in server
+        run: |
+          if grep -nE '(urlopen|urlretrieve|requests\.|httpx\.|aiohttp|socket\.create_connection)' server.py; then
+            echo "invariant 2 broken: server.py must not make outbound requests"
+            exit 1
+          fi
+          echo "ok: no outbound HTTP client"
+
+      - name: No credential paths opened
+        run: |
+          if grep -nE '(open|read_text|read_bytes)\([^)]*(credentials|\.claude/|\.codex/|keychain)' server.py; then
+            echo "invariant 1 broken: server.py must never read credentials"
+            exit 1
+          fi
+          echo "ok: no credential reads"

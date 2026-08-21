@@ -1,0 +1,87 @@
+name: Bug report
+description: Something behaves differently than documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this could be exploited by someone who reaches your tunnel, stop and
+        read [SECURITY.md](https://github.com/HarjjotSinghh/locum/blob/main/SECURITY.md)
+        instead. Do not describe it publicly here.
+
+        Before filing: three separate bugs in this project all presented as
+        "everything returns 404". The Troubleshooting section of the README
+        covers the port collision, the broken launch daemon, and nested-session
+        auth failures.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start the server with ...
+        2. Call delegate_to_claude with ...
+        3. Poll check_job, it returns ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: job
+    attributes:
+      label: check_job output
+      description: >
+        If a delegated job failed, paste the full check_job result. The
+        stderr_tail field exists specifically to make these reports useful.
+      render: json
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: macOS 15.5 / Ubuntu 24.04
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: CLI versions
+      description: Output of `claude --version` and/or `codex --version`.
+    validations:
+      required: true
+
+  - type: input
+    id: client
+    attributes:
+      label: MCP client
+      placeholder: Grok Bot, Claude Desktop, Cursor, custom
+    validations:
+      required: true
+
+  - type: dropdown
+    id: tunnel
+    attributes:
+      label: How is it exposed?
+      options:
+        - Named Cloudflare tunnel
+        - Cloudflare quick tunnel
+        - ngrok
+        - Other
+        - Not exposed, local only
+    validations:
+      required: true
+
+  - type: textarea
+    id: server_log
+    attributes:
+      label: Server output
+      description: Relevant lines from the terminal running server.py.
+      render: shell

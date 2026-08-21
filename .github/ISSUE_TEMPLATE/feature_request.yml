@@ -1,0 +1,51 @@
+name: Feature request
+description: Suggest something Locum should do.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Locum is deliberately small: one Python file, five tools. The bar for
+        adding to it is high, and "could this be twenty lines of stdlib in your
+        own fork?" is a fair answer.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: >
+        Describe the problem, not the solution. What are you doing today, and
+        where does it break down?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like Locum to do?
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: invariants
+    attributes:
+      label: Invariants
+      description: >
+        These four are why Locum can exist without violating a vendor's terms.
+        A proposal that needs one broken will be closed, so it is worth checking
+        now.
+      options:
+        - label: It does not read credential files, keychains, or OAuth tokens.
+          required: true
+        - label: It does not call a vendor API directly.
+          required: true
+        - label: It only spawns official vendor binaries.
+          required: true
+        - label: It keeps Locum single-operator.
+          required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried instead?
+      description: Existing tools, workarounds, or a fork.

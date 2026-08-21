@@ -1,8 +1,16 @@
-# locum
+# Locum
+
+[![CI](https://github.com/HarjjotSinghh/locum/actions/workflows/ci.yml/badge.svg)](https://github.com/HarjjotSinghh/locum/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+
+*A locum is a qualified professional who temporarily does someone else's job.*
 
 Lets Grok Bot delegate coding work to the Claude Code and Codex CLIs you are
 already logged into on your own machine, instead of burning Grok Bot usage on
 its own agent loop.
+
+Not affiliated with or endorsed by xAI, Anysphere, OpenAI, or Anthropic.
 
 Grok Bot runs on a persistent computer in xAI's cloud, so it cannot see
 `localhost`. It reaches this server over a tunnel, as a **custom MCP connector** --
@@ -75,8 +83,19 @@ cloudflared tunnel run locum
 ```
 
 `setup-tunnel.sh` is idempotent: it creates the named tunnel if missing, points
-DNS at it, and writes `~/.cloudflared/config.yml`. To keep it up across reboots,
-`sudo cloudflared service install`.
+DNS at it, and writes `~/.cloudflared/config.yml`.
+
+To keep the tunnel up across reboots, use the script, not `cloudflared service
+install`:
+
+```bash
+sudo ./install-service.sh
+```
+
+`cloudflared service install` writes a launchd plist containing only the binary
+path, with no `tunnel run` subcommand, so the daemon crash-loops while your
+user-level tunnel quietly masks the failure. `install-service.sh` writes the
+plist itself and verifies `/health` before claiming success.
 
 Register at `grok.com/connectors` -> **New Connector** -> **Custom**, with the
 tunnel URL plus `/mcp`.
@@ -163,7 +182,12 @@ curl -s http://localhost:<port>/health # if this differs, you have a collision
 `ingressRule=` and `originService=`, so you can see whether the 404 came from
 cloudflared's catch-all or from whatever is actually on the port.
 
-**Jobs fail with "OAuth session expired and could not be refreshed".** The
+**Jobs fail with "OAuth session expired and could not be refreshed".** Check the
+boring cause first: run `claude -p "reply with OK"` yourself. If that fails too,
+your Claude Code login has genuinely expired and `claude /login` fixes it. Locum
+surfaces the CLI's error verbatim, so this looks identical to a Locum bug.
+
+If `claude -p` works standalone but fails through Locum, then the
 server was launched from inside a Claude Code session. Claude Code exports
 `CLAUDECODE`, a `CLAUDE_CODE_*` family, and `ANTHROPIC_BASE_URL` into every
 child process; a `claude` that inherits them believes it is a nested child
@@ -191,3 +215,14 @@ urllib.request.Request(url, headers={"User-Agent": "locum-check/1.0"})
   hostname so the connector survives.
 - Cold delegation re-pays ~18k tokens of `CLAUDE.md` + system prompt setup.
   `resume_claude` avoids it.
+
+## Project
+
+- [How it works](https://www.harjotrana.com/blog/locum-grok-bot-provider-adapter),
+  the architecture writeup, with diagrams and the three bugs that cost the most time
+- [CONTRIBUTING.md](CONTRIBUTING.md), development setup and the four invariants
+- [SECURITY.md](SECURITY.md), threat model and how to report a vulnerability.
+  Read this before exposing Locum to a tunnel
+- [CHANGELOG.md](CHANGELOG.md)
+
+Licensed under [Apache 2.0](LICENSE).
