@@ -69,6 +69,13 @@ introduce one will be rejected.
   It removes the last check on what the agent may do.
 - Keep `LOCUM_TOKEN` out of version control. `.env` is gitignored; keep it that
   way, and keep the file at `chmod 600`.
+- **If you set `CLAUDE_CODE_OAUTH_TOKEN`**, understand what changes. Locum still
+  never reads a vendor credential store, and the invariant holds: the value is
+  one the operator minted with `claude setup-token` and placed in their own
+  environment, and Locum passes it through without inspecting it. But `.env` and
+  the plist `install-agent.sh` generates now hold a long-lived vendor
+  credential. Both are `chmod 600`. Revoke it if either is ever exposed, and
+  leave it unset unless you actually need the launchd agent.
 - Rotate `LOCUM_TOKEN` if you ever paste it somewhere shared. Rotating means
   re-registering the connector.
 - Do not host Locum for other people. It is designed for one operator on one

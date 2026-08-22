@@ -97,6 +97,23 @@ path, with no `tunnel run` subcommand, so the daemon crash-loops while your
 user-level tunnel quietly masks the failure. `install-service.sh` writes the
 plist itself and verifies `/health` before claiming success.
 
+That keeps the tunnel up. To keep the **server** up as well, so a reboot does not
+leave a healthy hostname pointing at nothing:
+
+```bash
+./install-agent.sh        # no sudo: it must run as you
+```
+
+Two macOS requirements, both of which fail confusingly if missed:
+
+- If this checkout is under `~/Documents`, `~/Desktop`, or `~/Downloads`, grant
+  **Full Disk Access to `uv`**. launchd agents do not inherit your terminal's
+  TCC grants, and TCC judges the executable launchd starts.
+- Run `claude setup-token` and put the result in `.env` as
+  `CLAUDE_CODE_OAUTH_TOKEN`. A launchd agent does not get your login session's
+  credential access, so delegation fails with "OAuth session expired" even
+  though the server itself starts fine.
+
 Register at `grok.com/connectors` -> **New Connector** -> **Custom**, with the
 tunnel URL plus `/mcp`.
 

@@ -193,9 +193,17 @@ def _child_env() -> dict[str, str]:
     exact = {"CLAUDECODE", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
              "CLAUDE_EFFORT", "CLAUDE_PID"}
     prefixes = ("CLAUDE_CODE_", "CLAUDE_AGENT_SDK_", "CLAUDE_PREVIEW_")
+
+    # CLAUDE_CODE_OAUTH_TOKEN matches the prefix above but is the opposite of
+    # session plumbing: it is a long-lived token the operator minted with
+    # `claude setup-token` so the CLI can authenticate without a login session.
+    # Stripping it would break exactly the headless case it exists for, and the
+    # failure looks identical to the nesting bug this function fixes.
+    keep = {"CLAUDE_CODE_OAUTH_TOKEN"}
+
     return {
         k: v for k, v in env.items()
-        if k not in exact and not k.startswith(prefixes)
+        if k in keep or (k not in exact and not k.startswith(prefixes))
     }
 
 
