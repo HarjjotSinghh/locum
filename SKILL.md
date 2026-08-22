@@ -49,6 +49,33 @@ jsonwebtoken library. Keep the same function signature. Verify with
 
 Bad: "fix the auth bug"
 
+## Choosing model and effort
+
+Both are optional, and omitting them uses the operator's defaults. That is the
+right call most of the time. Both cost the operator real quota, so raise them
+deliberately, not by habit.
+
+Raise `effort` when a wrong answer is expensive or hard to spot:
+
+- `"high"` for architecture decisions, subtle debugging, security-sensitive
+  changes, or anything touching auth, money, or data loss
+- `"max"` for a genuinely hard problem where you expect one attempt to settle it
+
+Leave `effort` off for mechanical work: renames, formatting, adding a test that
+mirrors one that already exists, applying a change you have already fully
+described.
+
+`model` follows the same logic. `"sonnet"` is fast and the usual choice;
+`"opus"` suits reasoning-heavy work. Omit it unless you have a reason.
+
+A good pattern is to start cheap and escalate: delegate at the default, and if
+the result is thin or the agent reports it is unsure, `resume_claude` the same
+session with `effort: "high"`. Resuming keeps the context you already paid for,
+so escalating costs far less than starting over.
+
+`check_job` and `list_jobs` echo the `model` and `effort` actually used, so you
+can tell the operator what a given answer cost them.
+
 ## Rules
 
 - Never re-delegate a job that is still `running`. Poll it.

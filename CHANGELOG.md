@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-22
+
+### Added
+
+- `effort` on `delegate_to_claude`, `resume_claude`, and `delegate_to_codex`:
+  `low`, `medium`, `high`, or `max`. One vocabulary across both CLIs, so a
+  caller never has to know that Claude takes `--effort` while Codex takes
+  `-c model_reasoning_effort`. Codex has no distinct `max`, so it maps onto its
+  ceiling rather than erroring.
+- `model` on `resume_claude`, which previously could not override it, so a
+  follow-up can escalate on the turn that actually needs it while keeping the
+  context already paid for.
+- `check_job` and `list_jobs` echo the `model` and `effort` a job ran with, so
+  what an answer cost is verifiable rather than assumed.
+- Guidance in `SKILL.md` for choosing them: raise effort where a wrong answer is
+  expensive or hard to spot, leave it off for mechanical edits, and prefer
+  escalating a resumed session over restarting at a higher setting.
+
+### Fixed
+
+- Codex progress reporting was reading a stream Codex no longer emits. It now
+  parses `thread.started` / `turn.started` / `item.completed` / `turn.completed`,
+  so `turns` counts instead of staying at 0, `recent_activity` shows the item
+  type and its command or path instead of the bare string `item.completed`, and
+  `thread_id` is captured as the session handle. The older flat `msg` envelope
+  still parses.
+- A Codex `turn.failed` or `error` event now marks the job failed. Codex can
+  fail a turn and still exit 0, so those jobs were reported `done` with whatever
+  happened to be in the output file.
+
 ## [0.2.0] - 2026-08-22
 
 ### Added
@@ -76,6 +106,7 @@ First public release.
   happens when nesting is detected, so a deliberate `ANTHROPIC_BASE_URL` still
   works in an ordinary terminal.
 
-[Unreleased]: https://github.com/HarjjotSinghh/locum/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/HarjjotSinghh/locum/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/HarjjotSinghh/locum/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/HarjjotSinghh/locum/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/HarjjotSinghh/locum/releases/tag/v0.1.0

@@ -197,9 +197,9 @@ Covers the job registry: ordering, status filtering, limits, truncation, and the
 
 | Tool | Purpose |
 |---|---|
-| `delegate_to_claude(prompt, cwd, model?)` | Start a Claude Code job. Returns `job_id` immediately. |
-| `resume_claude(session_id, prompt, cwd?)` | Continue a session. Reuses the prompt cache -- always prefer for follow-ups. |
-| `delegate_to_codex(prompt, cwd, model?)` | Same contract, via Codex CLI. |
+| `delegate_to_claude(prompt, cwd, model?, effort?)` | Start a Claude Code job. Returns `job_id` immediately. |
+| `resume_claude(session_id, prompt, cwd?, model?, effort?)` | Continue a session. Reuses the prompt cache -- always prefer for follow-ups. |
+| `delegate_to_codex(prompt, cwd, model?, effort?)` | Same contract, via Codex CLI. |
 | `check_job(job_id)` | Poll. Returns status, turn count, recent tool activity, result. |
 | `list_jobs(limit?, status?)` | Recent jobs, newest first. Confirms work really ran, recovers a lost `job_id`, finds a `session_id` to resume. |
 | `cancel_job(job_id)` | Kill a runaway job. |
@@ -207,6 +207,25 @@ Covers the job registry: ordering, status filtering, limits, truncation, and the
 Everything is async. MCP tool calls time out long before a real coding task
 finishes, so `delegate_*` returns a handle and the Bot polls. This is the single
 thing that makes the integration work at all.
+
+### Model and reasoning effort
+
+`effort` takes one vocabulary across both CLIs, so a caller never has to know
+which vendor spells it which way:
+
+| `effort` | Claude | Codex |
+|---|---|---|
+| `low` / `medium` / `high` | `--effort <level>` | `-c model_reasoning_effort="<level>"` |
+| `max` | `--effort max` | `-c model_reasoning_effort="high"` (no distinct max) |
+
+`model` passes through unvalidated, since vendors add models faster than any
+allowlist survives. Claude takes aliases (`opus`, `sonnet`, `fable`) or full
+names; Codex takes its own.
+
+Both are optional and both cost real quota, so the skill tells the Bot to raise
+them deliberately: high effort for architecture, subtle debugging, and anything
+touching auth or data loss, and nothing for mechanical edits. `check_job` and
+`list_jobs` echo what was actually used.
 
 ## Safety
 

@@ -59,6 +59,22 @@ JOB_TIMEOUT = int(os.environ.get("LOCUM_JOB_TIMEOUT", "1800"))
 MAX_CONCURRENT = int(os.environ.get("LOCUM_MAX_CONCURRENT", "2"))
 MAX_JOBS = int(os.environ.get("LOCUM_MAX_JOBS", "200"))
 
+# One vocabulary across both CLIs, so a caller never has to know which vendor
+# spells it which way. Claude takes --effort low|medium|high|xhigh|max; Codex
+# takes -c model_reasoning_effort with none|minimal|low|medium|high. "max" has
+# no Codex equivalent, so it lands on its ceiling rather than erroring.
+EFFORT_LEVELS = ("low", "medium", "high", "max")
+CODEX_EFFORT = {"low": "low", "medium": "medium", "high": "high", "max": "high"}
+
+
+def _effort(level: str | None) -> str | None:
+    if level is None:
+        return None
+    level = level.strip().lower()
+    if level not in EFFORT_LEVELS:
+        raise ValueError(f"effort must be one of {list(EFFORT_LEVELS)}, got {level!r}")
+    return level
+
 if not TOKEN:
     raise SystemExit(
         "LOCUM_TOKEN is not set. Pick one and keep it stable -- the Grok\n"
@@ -79,6 +95,8 @@ class Job:
     result: str | None = None
     error: str | None = None
     turns: int = 0
+    model: str | None = None
+    effort: str | None = None
     cost_usd: float | None = None
     started: float = field(default_factory=time.time)
     finished: float | None = None
@@ -120,6 +138,10 @@ def _snapshot(job: Job) -> dict[str, Any]:
         "turns": job.turns,
         "recent_activity": list(job.activity),
     }
+    if job.model:
+        out["model"] = job.model
+    if job.effort:
+        out["effort"] = job.effort
     if job.session_id:
         out["session_id"] = job.session_id
     if job.status == "done":
@@ -163,16 +185,43 @@ def _note_claude_event(job: Job, evt: dict[str, Any]) -> None:
 
 
 def _note_codex_event(job: Job, evt: dict[str, Any]) -> None:
-    # Codex's --json event shape shifts between releases, so stay tolerant:
-    # record whatever looks like a type, and take the real answer from the
-    # --output-last-message file once the process exits.
+    """Parse Codex's --json stream.
+
+    The events are thread.started / turn.started / item.completed /
+    turn.completed, with the interesting detail nested under `item`. Older
+    releases used a flat `msg` envelope with different names, so both shapes are
+    handled: turns counted off either vocabulary, and unknown event types
+    recorded rather than dropped.
+    """
     msg = evt.get("msg") if isinstance(evt.get("msg"), dict) else evt
-    label = msg.get("type") or evt.get("type")
-    if label and label not in {"token_count", "agent_message_delta"}:
-        job.activity.append(str(label)[:90])
-    if label in {"agent_message", "task_complete"}:
+    label = msg.get("type") or evt.get("type") or ""
+
+    # thread_id is Codex's session handle, the equivalent of Claude's session_id.
+    job.session_id = (evt.get("thread_id") or evt.get("session_id")
+                      or evt.get("conversation_id") or job.session_id)
+
+    if label in {"turn.completed", "agent_message", "task_complete"}:
         job.turns += 1
-    job.session_id = evt.get("session_id") or evt.get("conversation_id") or job.session_id
+        return
+
+    # A turn can fail while the process still exits 0, so without this a broken
+    # job reports "done" with whatever happened to be in the output file.
+    if label in {"error", "turn.failed"}:
+        detail = evt.get("message") or (evt.get("error") or {}).get("message") or label
+        job.status, job.error = "error", str(detail)[:600]
+        return
+
+    if label == "item.completed":
+        item = evt.get("item") or {}
+        kind = item.get("type") or "item"
+        detail = (item.get("command") or item.get("path")
+                  or item.get("text") or item.get("title") or "")
+        job.activity.append(f"{kind} {str(detail)[:90]}".strip())
+        return
+
+    if label and label not in {"token_count", "agent_message_delta",
+                               "turn.started", "thread.started"}:
+        job.activity.append(label[:90])
 
 
 def _child_env() -> dict[str, str]:
@@ -309,26 +358,38 @@ mcp = FastMCP(
 
 
 @mcp.tool
-async def delegate_to_claude(prompt: str, cwd: str | None = None, model: str | None = None) -> dict:
+async def delegate_to_claude(prompt: str, cwd: str | None = None,
+                             model: str | None = None,
+                             effort: str | None = None) -> dict:
     """Hand a coding task to the operator's local Claude Code. Returns a job_id
     immediately; poll check_job for the result.
 
     Args:
         prompt: One self-contained instruction. Say what "done" means and how to verify.
         cwd: Absolute path to the repo. Must sit under an allowed root.
-        model: Optional alias, e.g. "opus" or "sonnet". Omit for the operator's default.
+        model: Optional. Claude aliases: "opus" (deepest), "sonnet" (fast, the
+            usual choice), "fable". Omit for the operator's default.
+        effort: Optional reasoning depth: "low", "medium", "high", or "max".
+            Raise it for architecture, tricky debugging, or anything needing
+            care; leave it off for mechanical edits. Costs more time and tokens.
     """
+    effort = _effort(effort)
     argv = [_require("claude"), "-p", prompt,
             "--output-format", "stream-json", "--verbose",
             "--permission-mode", PERMISSION_MODE]
     if model:
         argv += ["--model", model]
-    job = Job(id=uuid.uuid4().hex[:12], kind="claude", prompt=prompt, cwd=_resolve_cwd(cwd))
+    if effort:
+        argv += ["--effort", effort]
+    job = Job(id=uuid.uuid4().hex[:12], kind="claude", prompt=prompt,
+              cwd=_resolve_cwd(cwd), model=model, effort=effort)
     return _spawn(job, argv, _note_claude_event)
 
 
 @mcp.tool
-async def resume_claude(session_id: str, prompt: str, cwd: str | None = None) -> dict:
+async def resume_claude(session_id: str, prompt: str, cwd: str | None = None,
+                        model: str | None = None,
+                        effort: str | None = None) -> dict:
     """Continue an earlier Claude Code session instead of starting cold. Much
     cheaper and much faster - it reuses the prompt cache and keeps prior context.
     Always prefer this over delegate_to_claude for follow-ups.
@@ -337,17 +398,28 @@ async def resume_claude(session_id: str, prompt: str, cwd: str | None = None) ->
         session_id: The session_id returned by a previous check_job.
         prompt: The follow-up instruction.
         cwd: Same repo as the original job.
+        model: Optional override for this turn only.
+        effort: Optional reasoning depth for this turn only. Useful to start
+            cheap and escalate when the follow-up is the hard part.
     """
+    effort = _effort(effort)
     argv = [_require("claude"), "-p", prompt, "--resume", session_id,
             "--output-format", "stream-json", "--verbose",
             "--permission-mode", PERMISSION_MODE]
-    job = Job(id=uuid.uuid4().hex[:12], kind="claude", prompt=prompt, cwd=_resolve_cwd(cwd))
+    if model:
+        argv += ["--model", model]
+    if effort:
+        argv += ["--effort", effort]
+    job = Job(id=uuid.uuid4().hex[:12], kind="claude", prompt=prompt,
+              cwd=_resolve_cwd(cwd), model=model, effort=effort)
     job.session_id = session_id
     return _spawn(job, argv, _note_claude_event)
 
 
 @mcp.tool
-async def delegate_to_codex(prompt: str, cwd: str | None = None, model: str | None = None) -> dict:
+async def delegate_to_codex(prompt: str, cwd: str | None = None,
+                            model: str | None = None,
+                            effort: str | None = None) -> dict:
     """Hand a coding task to the operator's local Codex CLI. Same async contract
     as delegate_to_claude. Useful as a second opinion or when Claude's weekly
     limit is exhausted.
@@ -356,7 +428,10 @@ async def delegate_to_codex(prompt: str, cwd: str | None = None, model: str | No
         prompt: One self-contained instruction.
         cwd: Absolute path to the repo. Must sit under an allowed root.
         model: Optional model override.
+        effort: Optional reasoning depth: "low", "medium", "high", or "max".
+            Codex has no distinct "max", so it maps onto "high".
     """
+    effort = _effort(effort)
     resolved = _resolve_cwd(cwd)
     outfile = Path(resolved) / f".codex-last-{uuid.uuid4().hex[:8]}.txt"
     argv = [_require("codex"), "exec", prompt, "--json",
@@ -364,6 +439,10 @@ async def delegate_to_codex(prompt: str, cwd: str | None = None, model: str | No
             "--output-last-message", str(outfile)]
     if model:
         argv += ["--model", model]
+    if effort:
+        # Codex exposes reasoning depth as a config override, not a flag, and
+        # -c has to precede the subcommand.
+        argv[1:1] = ["-c", f'model_reasoning_effort="{CODEX_EFFORT[effort]}"']
 
     def finalize(j: Job) -> None:
         try:
@@ -375,7 +454,8 @@ async def delegate_to_codex(prompt: str, cwd: str | None = None, model: str | No
         except OSError as exc:
             j.error = f"could not read codex output: {exc}"
 
-    job = Job(id=uuid.uuid4().hex[:12], kind="codex", prompt=prompt, cwd=resolved)
+    job = Job(id=uuid.uuid4().hex[:12], kind="codex", prompt=prompt, cwd=resolved,
+              model=model, effort=effort)
     return _spawn(job, argv, _note_codex_event, finalize)
 
 
@@ -431,6 +511,10 @@ async def list_jobs(limit: int = 10, status: str | None = None) -> dict:
             "cwd": job.cwd,
             "prompt": clip(job.prompt, 120),
         }
+        if job.model:
+            out["model"] = job.model
+        if job.effort:
+            out["effort"] = job.effort
         if job.session_id:
             out["session_id"] = job.session_id
         if job.status == "done" and job.result:

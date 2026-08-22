@@ -89,5 +89,56 @@ for i in range(20):
 ok("history bounded", len(srv.JOBS) <= 5, f"{len(srv.JOBS)} jobs held")
 ok("running job never pruned", "keepme" in srv.JOBS)
 
+print("\nmodel and effort")
+captured = {}
+_spawn_real = srv._spawn
+srv._spawn = lambda job, argv, *a, **k: captured.update(argv=argv, job=job) or {"job_id": job.id}
+imp = lambda t: getattr(t, "fn", t)
+
+asyncio.run(imp(srv.delegate_to_claude)("p", cwd="/tmp", model="opus", effort="max"))
+a = captured["argv"]
+ok("claude passes --model", "--model" in a and a[a.index("--model") + 1] == "opus")
+ok("claude passes --effort", "--effort" in a and a[a.index("--effort") + 1] == "max")
+ok("job records what was used",
+   captured["job"].model == "opus" and captured["job"].effort == "max")
+
+asyncio.run(imp(srv.delegate_to_codex)("p", cwd="/tmp", effort="max"))
+a = captured["argv"]
+ok("codex uses -c, not --effort", "-c" in a and "--effort" not in a)
+ok("codex maps max onto high", 'model_reasoning_effort="high"' in a)
+# -c must precede the subcommand or codex rejects it
+ok("codex -c precedes exec", a.index("-c") < a.index("exec"))
+
+asyncio.run(imp(srv.resume_claude)("sess-1", "p", cwd="/tmp", effort="low"))
+a = captured["argv"]
+ok("resume accepts effort", "--effort" in a and a[a.index("--effort") + 1] == "low")
+
+for bad in ("turbo", "MAXIMUM", ""):
+    try:
+        asyncio.run(imp(srv.delegate_to_claude)("p", cwd="/tmp", effort=bad))
+        ok(f"rejects effort {bad!r}", False)
+    except ValueError:
+        ok(f"rejects effort {bad!r}", True)
+
+asyncio.run(imp(srv.delegate_to_claude)("p", cwd="/tmp", effort="  HIGH  "))
+ok("effort is normalised", captured["job"].effort == "high")
+
+asyncio.run(imp(srv.delegate_to_claude)("p", cwd="/tmp"))
+a = captured["argv"]
+ok("omitted by default", "--effort" not in a and "--model" not in a)
+srv._spawn = _spawn_real
+
+print("\ncodex event parsing")
+j = srv.Job(id="cx", kind="codex", prompt="p", cwd="/tmp")
+srv._note_codex_event(j, {"type": "thread.started", "thread_id": "th-42"})
+ok("thread_id becomes session_id", j.session_id == "th-42")
+srv._note_codex_event(j, {"type": "item.completed",
+                          "item": {"type": "command_execution", "command": "pytest -q"}})
+ok("item detail captured", j.activity and "pytest -q" in j.activity[-1])
+srv._note_codex_event(j, {"type": "turn.completed", "usage": {}})
+ok("turn.completed counts a turn", j.turns == 1)
+srv._note_codex_event(j, {"type": "turn.failed", "error": {"message": "model refused"}})
+ok("turn.failed marks the job errored", j.status == "error" and "refused" in j.error)
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)
