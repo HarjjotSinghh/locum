@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `--version` / `-V`, reading the topmost `## [x.y.z]` heading in CHANGELOG.md.
+  Written by a delegated Claude Code job during the demo recording, which is a
+  fair test of the tool: the change it described matched the change it made.
+  Moved above the config block afterwards, because the module-level
+  `LOCUM_TOKEN` check raises `SystemExit` during import and a version flag that
+  demands a secret to answer is the wrong shape.
+
 ## [0.6.0] - 2026-08-22
 
 ### Changed

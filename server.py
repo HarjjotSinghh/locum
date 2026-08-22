@@ -24,8 +24,10 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import shutil
+import sys
 import time
 import uuid
 from collections import deque
@@ -38,6 +40,28 @@ from urllib.parse import parse_qsl, quote
 from fastmcp import FastMCP
 
 import dashboard
+
+# Version lives in CHANGELOG.md (and the matching git tag); read the topmost
+# released heading rather than keeping a second copy of the number here.
+def _read_version() -> str:
+    changelog = Path(__file__).resolve().parent / "CHANGELOG.md"
+    try:
+        for line in changelog.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"##\s*\[(\d[^\]]*)\]", line)
+            if m:
+                return m.group(1)
+    except OSError:
+        pass
+    return "unknown"
+
+
+__version__ = _read_version()
+
+# Before the config below: that raises SystemExit when LOCUM_TOKEN is unset, so
+# a version check placed after it would demand a secret to answer.
+if __name__ == "__main__" and {"--version", "-V"} & set(sys.argv[1:]):
+    print(f"locum {__version__}")
+    sys.exit(0)
 
 # ---------------------------------------------------------------- config ----
 
