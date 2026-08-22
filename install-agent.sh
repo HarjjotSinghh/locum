@@ -13,19 +13,19 @@
 #
 #   ./install-agent.sh          (no sudo -- sudo would defeat the purpose)
 #
-# macOS note. launchd agents do not inherit your terminal's TCC grants. If this
-# checkout, or LOCUM_ROOTS, lives under ~/Documents, ~/Desktop, or ~/Downloads,
-# the agent cannot read them and every start fails with "Operation not
-# permitted". The script detects that and tells you the fix rather than
-# reporting a false success.
+# macOS note. launchd agents do not inherit your terminal's TCC grants, and
+# ~/Documents, ~/Desktop, and ~/Downloads are protected. TCC attributes the
+# access to the executable launchd starts, so this plist execs `uv` directly
+# rather than a shell wrapper: granting Full Disk Access to uv then works,
+# whereas with a wrapper the responsible process is /bin/bash and the uv grant
+# is never consulted. That also means .env is read here, at install time, by
+# your terminal, and passed through EnvironmentVariables.
 
 set -euo pipefail
 
 LABEL=co.harjot.locum
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-SUPPORT="$HOME/Library/Application Support/locum"
-WRAPPER="$SUPPORT/run.sh"
 LOGDIR="$HOME/Library/Logs/locum"
 ERRLOG="$LOGDIR/server.err.log"
 GUI="gui/$(id -u)"
@@ -39,37 +39,32 @@ you, or the spawned CLIs will not find your logins."
 [ -f "$HERE/server.py" ] || die "No server.py next to this script."
 
 UV=$(command -v uv) || die "uv is not on PATH. https://docs.astral.sh/uv/"
+UV=$(readlink -f "$UV" 2>/dev/null || echo "$UV")
 
 PORT=$(awk -F= '/^LOCUM_PORT=/ {print $2}' "$HERE/.env")
 PORT=${PORT:-8791}
 
-# Warn early rather than after a confusing failure.
-case "$HERE" in
-  "$HOME"/Documents/*|"$HOME"/Desktop/*|"$HOME"/Downloads/*)
-    echo "!! $HERE is inside a TCC-protected folder."
-    echo "!! The agent will not start until you grant Full Disk Access (see below)."
-    ;;
-esac
+mkdir -p "$HOME/Library/LaunchAgents" "$LOGDIR"
 
-mkdir -p "$HOME/Library/LaunchAgents" "$SUPPORT" "$LOGDIR"
+# Build EnvironmentVariables from .env. launchd hands an agent a near-empty
+# environment, and PATH must be explicit because uv shells out to python and
+# node-managed installs of `claude` sit outside launchd's default PATH.
+xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 
-# The wrapper lives outside the repo because launchd cannot execute a file in a
-# TCC-protected folder at all, and a clear "cannot read .env" beats an opaque
-# "cannot execute run.sh". launchd also gives an agent a near-empty environment
-# and no shell, so sourcing .env has to happen here rather than in the plist.
-# PATH is rebuilt explicitly: uv shells out to python, and node-managed installs
-# of `claude` sit outside launchd's default PATH.
-cat > "$WRAPPER" <<WRAPPEREOF
-#!/usr/bin/env bash
-set -euo pipefail
-cd "$HERE"
-export PATH="$(dirname "$UV"):$HOME/.local/bin:$HOME/.local/share/mise/shims:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-set -a
-. "$HERE/.env"
-set +a
-exec "$UV" run server.py
-WRAPPEREOF
-chmod +x "$WRAPPER"
+ENVXML=$(
+  printf '    <key>PATH</key><string>%s</string>\n' \
+    "$(xml_escape "$(dirname "$UV"):$HOME/.local/bin:$HOME/.local/share/mise/shims:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")"
+  printf '    <key>HOME</key><string>%s</string>\n' "$(xml_escape "$HOME")"
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    [ -n "$line" ] || continue
+    [ "${line:0:1}" = "#" ] && continue
+    key=${line%%=*}
+    val=${line#*=}
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    printf '    <key>%s</key><string>%s</string>\n' "$key" "$(xml_escape "$val")"
+  done < "$HERE/.env"
+)
 
 cat > "$PLIST" <<PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -79,8 +74,14 @@ cat > "$PLIST" <<PLISTEOF
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$WRAPPER</string>
+    <string>$UV</string>
+    <string>run</string>
+    <string>$HERE/server.py</string>
   </array>
+  <key>WorkingDirectory</key><string>$HERE</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+$ENVXML  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
@@ -90,13 +91,14 @@ cat > "$PLIST" <<PLISTEOF
 </plist>
 PLISTEOF
 
+# The plist now carries LOCUM_TOKEN, so it is as sensitive as .env.
+chmod 600 "$PLIST"
 plutil -lint "$PLIST" >/dev/null
 
 echo "==> stopping anything already serving port $PORT"
 launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
-# Match both `uv run server.py` and the python it execs, which carries only the
-# relative path in its argv and so escapes an absolute-path pattern.
-pkill -f "$HERE/server.py" 2>/dev/null || true
+# uv execs python with a relative argv, so an absolute-path pkill misses it.
+# Killing by listening port is the only reliable teardown.
 for pid in $(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null); do kill "$pid" 2>/dev/null || true; done
 sleep 2
 
@@ -105,16 +107,14 @@ echo "==> loading $LABEL"
 launchctl bootstrap "$GUI" "$PLIST"
 launchctl enable "$GUI/$LABEL" 2>/dev/null || true
 
-# Verifying the port answers is not enough: a leftover process on the same port
-# makes a broken agent look healthy. Require the listening pid to be the agent's.
+# Verifying the port answers is not verification: a leftover server on the same
+# port makes a broken agent look healthy. Require the listening pid to descend
+# from the agent's own pid.
 echo "==> verifying the agent itself is serving"
 for _ in $(seq 1 30); do
   AGENT_PID=$(launchctl print "$GUI/$LABEL" 2>/dev/null | awk '/^\tpid = /{print $3}')
   if [ -n "${AGENT_PID:-}" ] && curl -sf --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-    LISTEN_PID=$(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1)
-    # The agent runs the wrapper, which execs uv, which spawns python. The
-    # listener is a descendant, so walk parents up to the agent.
-    p=$LISTEN_PID
+    p=$(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1)
     for _ in 1 2 3 4 5; do
       [ "$p" = "$AGENT_PID" ] && break
       p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ') || break
@@ -130,6 +130,8 @@ OK -- the agent is serving on port $PORT and will come back after a reboot.
   stop     launchctl bootout $GUI/$LABEL
   remove   launchctl bootout $GUI/$LABEL && rm "$PLIST"
 
+Re-run this script after editing .env: the values are copied into the plist.
+
 DONE
       exit 0
     fi
@@ -138,18 +140,16 @@ DONE
     launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
     die "macOS blocked the agent from reading $HERE.
 
-launchd agents do not inherit the Full Disk Access your terminal has, and
-~/Documents, ~/Desktop, and ~/Downloads are protected. The agent cannot read
-.env, and a spawned agent could not read your workspace roots either.
+TCC attributes the access to the executable launchd started, which is:
+  $UV
 
-Two ways forward:
+Grant it Full Disk Access, then re-run this script:
+  System Settings > Privacy & Security > Full Disk Access > +
+  press Cmd+Shift+G and enter the path above
 
-  1. Grant Full Disk Access to uv:
-       System Settings > Privacy & Security > Full Disk Access > +
-       press Cmd+Shift+G and enter: $UV
-     then re-run this script.
-
-  2. Move this checkout and LOCUM_ROOTS somewhere unprotected, e.g. ~/src.
+If uv already appears there and is switched on, remove it with the minus button
+and add it again: the entry is keyed to the binary, and a uv upgrade invalidates
+it. Alternatively, move this checkout and LOCUM_ROOTS somewhere unprotected.
 
 Until then, run the server in a terminal:  uv run server.py
 The tunnel daemon from install-service.sh is unaffected."
