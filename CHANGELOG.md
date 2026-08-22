@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The dashboard's live feed hung at "connecting" behind Cloudflare. The stream
+  sent response headers and then waited up to 20s for its first event, and a
+  proxy holds headers until some body arrives, so the browser never saw a
+  response and `EventSource.onopen` never fired. It now flushes a comment
+  immediately and sets `X-Accel-Buffering: no`. First byte through the tunnel
+  went from never to about 0.4s.
+- `/favicon.ico` returns 204 instead of 401. Browsers request it unprompted, so
+  a healthy dashboard showed a red console error.
+
 ## [0.5.0] - 2026-08-22
 
 ### Added

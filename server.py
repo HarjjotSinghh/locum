@@ -847,12 +847,21 @@ class AuthGateway:
         SUBSCRIBERS.add(q)
         await send({"type": "http.response.start", "status": 200,
                     "headers": [(b"content-type", b"text/event-stream"),
-                                (b"cache-control", b"no-store"),
+                                (b"cache-control", b"no-cache, no-store"),
+                                # Cloudflare and nginx both buffer a response
+                                # until it looks complete unless told not to,
+                                # which stalls a stream indefinitely.
+                                (b"x-accel-buffering", b"no"),
                                 (b"connection", b"keep-alive")]})
         try:
+            # Flush a byte immediately. A proxy may hold the headers until some
+            # body arrives, and until they arrive the browser never fires
+            # EventSource.onopen, so the page sits on "connecting" forever.
+            await send({"type": "http.response.body",
+                        "body": b": open\n\n", "more_body": True})
             while True:
                 try:
-                    payload = await asyncio.wait_for(q.get(), timeout=20)
+                    payload = await asyncio.wait_for(q.get(), timeout=15)
                     body = f"data: {json.dumps(payload)}\n\n".encode()
                 except asyncio.TimeoutError:
                     body = b": keepalive\n\n"   # keeps proxies from closing it
@@ -871,6 +880,11 @@ class AuthGateway:
 
         if path == "/health":
             return await self._json(send, 200, {"ok": True})
+
+        # Browsers request this unprompted on every page. Answering 401 puts a
+        # red error in the console of an otherwise healthy dashboard.
+        if path == "/favicon.ico":
+            return await self._send(send, 204, b"", "image/x-icon")
 
         if path == "/dashboard":
             return await self._dashboard(scope, receive, send, method)
