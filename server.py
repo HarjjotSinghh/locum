@@ -57,6 +57,13 @@ TOKEN = os.environ.get("LOCUM_TOKEN", "")
 HOST = os.environ.get("LOCUM_HOST", "127.0.0.1")
 PORT = int(os.environ.get("LOCUM_PORT", "8791"))
 PERMISSION_MODE = os.environ.get("LOCUM_PERMISSION_MODE", "acceptEdits")
+# A delegated job has nobody at the keyboard. Anything that stops to ask for
+# approval does not pause, it hangs until the job times out, so autonomy is the
+# default. "ask" restores prompting for anyone driving Locum from a client that
+# can actually surface them.
+AUTONOMY = os.environ.get("LOCUM_AUTONOMY", "bypass").strip().lower()
+if AUTONOMY not in {"bypass", "ask"}:
+    raise SystemExit(f'LOCUM_AUTONOMY must be "bypass" or "ask", got {AUTONOMY!r}')
 JOB_TIMEOUT = int(os.environ.get("LOCUM_JOB_TIMEOUT", "1800"))
 MAX_CONCURRENT = int(os.environ.get("LOCUM_MAX_CONCURRENT", "2"))
 MAX_JOBS = int(os.environ.get("LOCUM_MAX_JOBS", "200"))
@@ -73,6 +80,18 @@ MAX_EVENTS = int(os.environ.get("LOCUM_MAX_EVENTS", "400"))
 # no Codex equivalent, so it lands on its ceiling rather than erroring.
 EFFORT_LEVELS = ("low", "medium", "high", "max")
 CODEX_EFFORT = {"low": "low", "medium": "medium", "high": "high", "max": "high"}
+
+
+def _claude_autonomy() -> list[str]:
+    if AUTONOMY == "bypass":
+        return ["--dangerously-skip-permissions"]
+    return ["--permission-mode", PERMISSION_MODE]
+
+
+def _codex_autonomy() -> list[str]:
+    if AUTONOMY == "bypass":
+        return ["--dangerously-bypass-approvals-and-sandbox"]
+    return ["--sandbox", "workspace-write"]
 
 
 def _effort(level: str | None) -> str | None:
@@ -545,8 +564,7 @@ async def delegate_to_claude(prompt: str, cwd: str | None = None,
     """
     effort = _effort(effort)
     argv = [_require("claude"), "-p", prompt,
-            "--output-format", "stream-json", "--verbose",
-            "--permission-mode", PERMISSION_MODE]
+            "--output-format", "stream-json", "--verbose"] + _claude_autonomy()
     if model:
         argv += ["--model", model]
     if effort:
@@ -574,8 +592,7 @@ async def resume_claude(session_id: str, prompt: str, cwd: str | None = None,
     """
     effort = _effort(effort)
     argv = [_require("claude"), "-p", prompt, "--resume", session_id,
-            "--output-format", "stream-json", "--verbose",
-            "--permission-mode", PERMISSION_MODE]
+            "--output-format", "stream-json", "--verbose"] + _claude_autonomy()
     if model:
         argv += ["--model", model]
     if effort:
@@ -606,7 +623,7 @@ async def delegate_to_codex(prompt: str, cwd: str | None = None,
     outfile = Path(resolved) / f".codex-last-{uuid.uuid4().hex[:8]}.txt"
     argv = [_require("codex"), "exec", prompt, "--json",
             "--cd", resolved, "--skip-git-repo-check",
-            "--output-last-message", str(outfile)]
+            "--output-last-message", str(outfile)] + _codex_autonomy()
     if model:
         argv += ["--model", model]
     if effort:

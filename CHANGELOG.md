@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Delegated jobs now run autonomously by default.** `LOCUM_AUTONOMY=bypass`
+  passes `--dangerously-skip-permissions` to Claude and
+  `--dangerously-bypass-approvals-and-sandbox` to Codex. A delegated job has
+  nobody at the keyboard, so an approval prompt does not pause it, it hangs it
+  until `LOCUM_JOB_TIMEOUT`. Jobs involving `gh`, package installs, or anything
+  else the agent wanted to confirm were stalling.
+- `LOCUM_AUTONOMY=ask` restores prompting (`--permission-mode` for Claude,
+  `--sandbox workspace-write` for Codex). Only useful from a client that can
+  surface prompts; Grok Bot cannot.
+- `LOCUM_PERMISSION_MODE` is now consulted only in `ask` mode.
+- SECURITY.md and the README were rewritten around this rather than patched.
+  They previously said never to run with permissions bypassed, which the new
+  default contradicts. The honest version: the token and a narrow `LOCUM_ROOTS`
+  are what protect you now, the agent's permission model is not, and the
+  workspace allowlist bounds where a job starts rather than what a shell command
+  it runs can reach.
+
 ### Fixed
 
 - The dashboard's live feed hung at "connecting" behind Cloudflare. The stream

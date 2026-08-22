@@ -267,9 +267,25 @@ long-running install either turn narration off or truncate it periodically.
 
 ## Safety
 
-`LOCUM_ROOTS` is the only barrier between a cloud agent and your home
-directory. Keep it narrow. Never set `LOCUM_PERMISSION_MODE=bypassPermissions`
-while a tunnel is open.
+Locum runs agents autonomously by default, because a delegated job has nobody
+at the keyboard: an approval prompt does not pause the work, it hangs the job
+until it times out. `LOCUM_AUTONOMY=bypass` passes
+`--dangerously-skip-permissions` to Claude and
+`--dangerously-bypass-approvals-and-sandbox` to Codex.
+
+Be clear-eyed about what that buys and costs. The agent can run any command as
+your user. `LOCUM_ROOTS` bounds the directory a job *starts* in, and it is still
+the check that stops a caller pointing a job at `~/.ssh`, but a shell command
+the agent runs is not confined by it.
+
+What actually protects you, in order:
+
+1. `LOCUM_TOKEN`, which gates both the consent screen and every MCP call
+2. `LOCUM_ROOTS`, kept narrow
+3. Running this only for yourself, on your own machine
+
+`LOCUM_AUTONOMY=ask` restores prompting, but only use it from a client that can
+surface the prompts. Grok Bot cannot, so jobs will hang.
 
 Every token comparison uses `hmac.compare_digest`. Authorization codes are
 single-use and expire in 120s. PKCE `S256` is required -- `plain` is refused.

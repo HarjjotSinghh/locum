@@ -20,8 +20,10 @@ is authorised, and that everything reaching it over the tunnel is untrusted
 until it proves otherwise.
 
 **What an attacker gets if they defeat authentication:** the ability to run
-coding agents, and therefore arbitrary shell commands, inside your allowed
-workspace roots, as your user. Treat a Locum token like an SSH key.
+arbitrary shell commands as your user, with approval prompts disabled. The
+workspace allowlist bounds where a job starts, not what a shell command can
+reach. Treat a Locum token exactly like an SSH key, because it grants the same
+thing.
 
 Three controls stand between the public internet and that outcome:
 
@@ -29,7 +31,7 @@ Three controls stand between the public internet and that outcome:
 |---|---|
 | `LOCUM_TOKEN` on the consent screen | anyone who merely learned the tunnel URL |
 | `LOCUM_ROOTS` allowlist | reaching files outside the directories you named |
-| `LOCUM_PERMISSION_MODE` | the agent taking actions you did not sanction |
+| `LOCUM_AUTONOMY` | nothing, at the default. See below. |
 
 ### Authentication
 
@@ -65,8 +67,13 @@ introduce one will be rejected.
 
 ## Operator responsibilities
 
-- **Never set `LOCUM_PERMISSION_MODE=bypassPermissions` while a tunnel is open.**
-  It removes the last check on what the agent may do.
+- **Understand that `LOCUM_AUTONOMY` defaults to `bypass`.** Delegated jobs run
+  with all approval prompts disabled, because a job nobody is watching cannot
+  answer one: the prompt hangs the job instead of pausing it. This is a
+  deliberate trade, and it means an authenticated caller can run any command as
+  your user. The token and a narrow `LOCUM_ROOTS` are what stand in the way, not
+  the agent's own permission model. Set `LOCUM_AUTONOMY=ask` if you are driving
+  Locum from a client that can actually show prompts.
 - Keep `LOCUM_TOKEN` out of version control. `.env` is gitignored; keep it that
   way, and keep the file at `chmod 600`.
 - **If you set `CLAUDE_CODE_OAUTH_TOKEN`**, understand what changes. Locum still
@@ -90,5 +97,7 @@ introduce one will be rejected.
 - Vulnerabilities in `claude`, `codex`, `cloudflared`, or Grok Bot. Report those
   to their maintainers.
 - Prompt injection reaching the agent through repository contents. Locum passes
-  prompts to the CLI unchanged; the agent's own permission model is the control.
+  prompts to the CLI unchanged and, at the default autonomy, the agent's own
+  permission model is not a control either. A repository you would not run
+  `make` in is a repository you should not point a delegated job at.
 - Denial of service against your own tunnel.
