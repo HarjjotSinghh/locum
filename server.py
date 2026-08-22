@@ -101,6 +101,7 @@ class Job:
     started: float = field(default_factory=time.time)
     finished: float | None = None
     activity: deque[str] = field(default_factory=lambda: deque(maxlen=14))
+    seen_labels: set[str] = field(default_factory=set)
     stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=20))
     proc: Any = None
 
@@ -184,43 +185,75 @@ def _note_claude_event(job: Job, evt: dict[str, Any]) -> None:
             job.status, job.result = "done", evt.get("result") or ""
 
 
-def _note_codex_event(job: Job, evt: dict[str, Any]) -> None:
+def _note_codex_event(job: Job, evt: Any) -> None:
     """Parse Codex's --json stream.
 
-    The events are thread.started / turn.started / item.completed /
-    turn.completed, with the interesting detail nested under `item`. Older
-    releases used a flat `msg` envelope with different names, so both shapes are
-    handled: turns counted off either vocabulary, and unknown event types
-    recorded rather than dropped.
+    Current events are thread.started / turn.started / item.completed /
+    turn.completed with detail nested under `item`. Older releases used a flat
+    `msg` envelope with different names; both are handled.
+
+    Every field is type-checked before use. A stream carrying a bare string, a
+    number, or a list is valid JSON, and an unguarded .get() on one takes down
+    the stdout reader, which used to mean the child was never reaped and the
+    Codex output file was never cleaned up.
     """
-    msg = evt.get("msg") if isinstance(evt.get("msg"), dict) else evt
-    label = msg.get("type") or evt.get("type") or ""
-
-    # thread_id is Codex's session handle, the equivalent of Claude's session_id.
-    job.session_id = (evt.get("thread_id") or evt.get("session_id")
-                      or evt.get("conversation_id") or job.session_id)
-
-    if label in {"turn.completed", "agent_message", "task_complete"}:
-        job.turns += 1
+    if not isinstance(evt, dict):
+        job.activity.append(str(evt)[:90])
         return
 
-    # A turn can fail while the process still exits 0, so without this a broken
-    # job reports "done" with whatever happened to be in the output file.
+    msg = evt.get("msg") if isinstance(evt.get("msg"), dict) else evt
+    label = msg.get("type") or evt.get("type") or ""
+    if not isinstance(label, str):
+        label = str(label)
+
+    # Read identifiers from whichever envelope carries them.
+    for src in (evt, msg):
+        found = src.get("thread_id") or src.get("session_id") or src.get("conversation_id")
+        if isinstance(found, str) and found:
+            job.session_id = found
+
+    # Counting both vocabularies double-counts an old-protocol turn, since
+    # agent_message and task_complete both fire for the same turn.
+    job.seen_labels.add(label)
+
+    if label == "turn.completed":
+        job.turns += 1
+        return
+    # In the old vocabulary the per-turn marker is agent_message; task_complete
+    # fires once for the whole exec, so counting it too inflated every turn
+    # count by one.
+    if label == "agent_message" and "turn.completed" not in job.seen_labels:
+        job.turns += 1
+        return
+    if label == "task_complete":
+        return
+
+    # Record the failure but leave the status alone. Codex can emit a transient
+    # error and carry on; flipping the job out of "running" here would break
+    # cancel_job, let _prune_jobs evict a live job, and mask a later success.
+    # _run decides the final status once the process actually exits.
     if label in {"error", "turn.failed"}:
-        detail = evt.get("message") or (evt.get("error") or {}).get("message") or label
-        job.status, job.error = "error", str(detail)[:600]
+        err = evt.get("error") if isinstance(evt.get("error"), dict) else msg.get("error")
+        detail = (evt.get("message") or msg.get("message")
+                  or (err.get("message") if isinstance(err, dict) else None)
+                  or (err if isinstance(err, str) else None)
+                  or label)
+        job.error = str(detail)[:600]
+        job.activity.append(f"error {str(detail)[:80]}")
         return
 
     if label == "item.completed":
-        item = evt.get("item") or {}
+        item = evt.get("item") if isinstance(evt.get("item"), dict) else {}
         kind = item.get("type") or "item"
         detail = (item.get("command") or item.get("path")
                   or item.get("text") or item.get("title") or "")
         job.activity.append(f"{kind} {str(detail)[:90]}".strip())
         return
 
-    if label and label not in {"token_count", "agent_message_delta",
-                               "turn.started", "thread.started"}:
+    # item.started / item.updated fire constantly and say nothing item.completed
+    # does not; without this they crowd everything useful out of the deque.
+    if label and label not in {"token_count", "agent_message_delta", "turn.started",
+                               "thread.started", "item.started", "item.updated"}:
         job.activity.append(label[:90])
 
 
@@ -280,6 +313,12 @@ async def _run(job: Job, argv: list[str], on_event, finalize=None) -> None:
                         on_event(job, json.loads(line))
                     except json.JSONDecodeError:
                         job.activity.append(line[:90])
+                    except Exception as exc:            # noqa: BLE001
+                        # Never let a parser bug escape into the gather: that
+                        # kills the reader, and _run then skips proc.wait() and
+                        # finalize, leaving the child unreaped and the Codex
+                        # output file on disk. Losing one event beats leaking.
+                        job.activity.append(f"unparsed event ({type(exc).__name__})")
 
             await asyncio.wait_for(
                 asyncio.gather(read_stdout(), _pump_stderr(proc.stderr, job)),
@@ -290,12 +329,16 @@ async def _run(job: Job, argv: list[str], on_event, finalize=None) -> None:
             if finalize:
                 finalize(job)
             if job.status == "running":
-                if rc == 0:
+                if rc != 0:
+                    job.status = "error"
+                    job.error = job.error or f"{job.kind} exited {rc}"
+                elif job.error:
+                    # Exit code 0 with a reported failure: Codex does this when
+                    # a turn fails, and trusting rc alone reports it as done.
+                    job.status = "error"
+                else:
                     job.status = "done"
                     job.result = job.result or "(process exited 0 with no captured result)"
-                else:
-                    job.status = "error"
-                    job.error = f"{job.kind} exited {rc}"
         except asyncio.TimeoutError:
             job.status = "timeout"
             job.error = f"exceeded LOCUM_JOB_TIMEOUT ({JOB_TIMEOUT}s)"

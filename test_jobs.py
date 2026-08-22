@@ -145,7 +145,55 @@ ok("item detail captured", j.activity and "pytest -q" in j.activity[-1])
 srv._note_codex_event(j, {"type": "turn.completed", "usage": {}})
 ok("turn.completed counts a turn", j.turns == 1)
 srv._note_codex_event(j, {"type": "turn.failed", "error": {"message": "model refused"}})
-ok("turn.failed marks the job errored", j.status == "error" and "refused" in j.error)
+ok("turn.failed records the error", "refused" in (j.error or ""))
+ok("turn.failed leaves status to _run", j.status == "running")
+
+print("\ncodex parser hardening")
+def fresh():
+    return srv.Job(id="cx", kind="codex", prompt="p", cwd=ROOT)
+
+for label, evt in [("bare string", "error"), ("number", 123), ("list", ["a"]),
+                   ("error as string", {"type": "turn.failed", "error": "boom"}),
+                   ("item as string", {"type": "item.completed", "item": "oops"}),
+                   ("null item", {"type": "item.completed", "item": None})]:
+    j = fresh()
+    try:
+        srv._note_codex_event(j, evt)
+        ok(f"survives {label}", True)
+    except Exception as e:
+        ok(f"survives {label}", False, f"{type(e).__name__}: {e}")
+
+j = fresh()
+srv._note_codex_event(j, {"type": "turn.failed", "error": "boom"})
+ok("failure recorded", j.error == "boom")
+ok("but status left running", j.status == "running", "so cancel_job and prune stay correct")
+
+j = fresh()
+srv._note_codex_event(j, {"type": "error", "message": "transient"})
+srv._note_codex_event(j, {"type": "turn.completed"})
+ok("transient error does not freeze the job", j.status == "running" and j.turns == 1)
+
+j = fresh()
+for e in ({"type": "agent_message"}, {"type": "task_complete"}):
+    srv._note_codex_event(j, e)
+ok("old vocabulary counts one turn", j.turns == 1, f"got {j.turns}")
+j2 = fresh()
+srv._note_codex_event(j2, {"type": "task_complete"})
+ok("task_complete alone is not a turn", j2.turns == 0, f"got {j2.turns}")
+
+j = fresh()
+srv._note_codex_event(j, {"type": "turn.completed"})
+srv._note_codex_event(j, {"type": "agent_message"})
+ok("new vocabulary wins once seen", j.turns == 1, f"got {j.turns}")
+
+j = fresh()
+for e in ({"type": "item.started"}, {"type": "item.updated"}, {"type": "token_count"}):
+    srv._note_codex_event(j, e)
+ok("noisy events do not flood activity", len(j.activity) == 0)
+
+j = fresh()
+srv._note_codex_event(j, {"msg": {"type": "agent_message", "session_id": "old-1"}})
+ok("old msg envelope yields session_id", j.session_id == "old-1")
 
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

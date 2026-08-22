@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-22
+
+Found by delegating a review of `_note_codex_event` to Locum itself, at
+`model: opus, effort: high`, an hour after that function was written.
+
+### Fixed
+
+- `_note_codex_event` crashed on any JSON line that was not an object. A bare
+  string, number, or list is valid JSON and raised `AttributeError`, which
+  killed the stdout reader; `_run` then skipped both `proc.wait()` and
+  `finalize`, leaving the Codex child unreaped and its `.codex-last-*.txt`
+  behind. Nested `error` and `item` values are now type-checked too.
+- Any parser exception is now contained at the call site, so no future bug in
+  event handling can skip process cleanup. Losing one event beats leaking a
+  process.
+- A mid-stream `error` or `turn.failed` no longer flips the job out of
+  `running`. Codex can emit a transient error and carry on, and marking the job
+  failed immediately broke `cancel_job`, let `_prune_jobs` evict a live job, and
+  masked a later success. `_run` now decides the final status when the process
+  exits, including the exit-0-with-a-reported-failure case.
+- Turn counting no longer double-counts on the old protocol. `task_complete`
+  fires once per exec rather than once per turn, so counting it alongside
+  `agent_message` inflated every count.
+- `item.started` and `item.updated` no longer crowd `recent_activity`. They fire
+  constantly and add nothing `item.completed` does not.
+- Session identifiers are read from the old flat `msg` envelope as well as the
+  current one, instead of only being used for the event label.
+
 ## [0.3.0] - 2026-08-22
 
 ### Added
@@ -106,7 +134,8 @@ First public release.
   happens when nesting is detected, so a deliberate `ANTHROPIC_BASE_URL` still
   works in an ordinary terminal.
 
-[Unreleased]: https://github.com/HarjjotSinghh/locum/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/HarjjotSinghh/locum/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/HarjjotSinghh/locum/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/HarjjotSinghh/locum/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/HarjjotSinghh/locum/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/HarjjotSinghh/locum/releases/tag/v0.1.0
