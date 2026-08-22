@@ -91,8 +91,11 @@ ok("running job never pruned", "keepme" in srv.JOBS)
 
 print("\nmodel and effort")
 captured = {}
-_spawn_real = srv._spawn
+_spawn_real, _require_real = srv._spawn, srv._require
 srv._spawn = lambda job, argv, *a, **k: captured.update(argv=argv, job=job) or {"job_id": job.id}
+# Argv construction is what is under test, not whether the CLIs are installed,
+# so the suite stays runnable on a machine (or CI runner) without them.
+srv._require = lambda binary: f"/usr/bin/{binary}"
 imp = lambda t: getattr(t, "fn", t)
 
 asyncio.run(imp(srv.delegate_to_claude)("p", cwd="/tmp", model="opus", effort="max"))
@@ -126,7 +129,7 @@ ok("effort is normalised", captured["job"].effort == "high")
 asyncio.run(imp(srv.delegate_to_claude)("p", cwd="/tmp"))
 a = captured["argv"]
 ok("omitted by default", "--effort" not in a and "--model" not in a)
-srv._spawn = _spawn_real
+srv._spawn, srv._require = _spawn_real, _require_real
 
 print("\ncodex event parsing")
 j = srv.Job(id="cx", kind="codex", prompt="p", cwd="/tmp")
