@@ -1,3 +1,11 @@
+---
+name: delegate-to-locum
+description: >
+  Delegate coding work to the operator's own machine through the locum
+  connector. Use for multi-file edits, refactors, debugging, test runs, and
+  reading large codebases.
+---
+
 # Delegate coding work to the local bridge
 
 Use the `locum` connector for anything that touches a real repository:

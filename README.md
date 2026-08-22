@@ -141,8 +141,40 @@ That passphrase gate is load-bearing. `/authorize` sits on a public tunnel;
 without it, anyone who learned the URL could mint a token and get shell access
 to your machine.
 
-Finally, paste `SKILL.md` into a Grok Bot Skill. Without it the Bot keeps
-grinding through its own loop and you save nothing.
+### Making the Bot actually use it
+
+A connector only makes the tools *available*. Without an instruction to prefer
+them, the Bot keeps grinding through its own loop and you save nothing. Two
+levers, and the weaker one is the one people reach for first.
+
+**1. The Bot's description (strongest).** Create a dedicated Bot, then
+**Bot actions → Edit Profile → Description**. That field is for rules that
+should remain true, so it applies to every conversation without being invoked:
+
+```
+You have the `locum` connector, which delegates work to the operator's own
+machine.
+
+Any task touching a real repository (multi-file edits, refactors, debugging,
+running tests, reading a codebase) must go to delegate_to_claude rather than
+being done yourself.
+
+delegate_to_claude returns a job_id immediately. Poll check_job about every 30s
+and report recent_activity so progress is visible. Never re-delegate a job that
+is still running. For follow-ups on the same work use resume_claude with the
+session_id, never a fresh delegation.
+
+cwd must be an absolute path inside an allowed root.
+```
+
+**2. A saved Skill (the detail).** `SKILL.md` in this repo covers how to write a
+good delegation prompt and what to do when a job errors. Save it by asking a Bot
+"save this as a skill called delegate-to-locum" with the file contents pasted,
+then enable it under **Settings → Plugins → Yours**. Invoke explicitly with `/`
+in the composer when you want it applied to a specific task.
+
+Use both. The description guarantees the behaviour; the skill improves the
+quality of the prompts the Bot writes.
 
 ## Tests
 
