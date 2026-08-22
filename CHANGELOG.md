@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-22
+
+### Added
+
+- `list_jobs(limit, status)`: recent jobs, newest first. Answers the first
+  question every new operator has, "did it actually run on my machine", without
+  grepping the access log. Also recovers a `job_id` you lost and surfaces a
+  `session_id` worth resuming.
+- `LOCUM_MAX_JOBS` (default 200). Job history lived in memory for the process
+  lifetime, which was harmless when the server died with your terminal and is a
+  slow leak now that it runs under launchd for weeks. Finished jobs are pruned
+  oldest-first past the cap; running jobs are never dropped, since their handle
+  is the only way back to them.
+- `test_jobs.py`, 18 assertions over ordering, filtering, limits, truncation,
+  and the cap. Injects jobs directly into the registry, so it needs no `claude`.
+
+### Fixed
+
+- `CLAUDE_CODE_OAUTH_TOKEN` is no longer stripped by `_child_env()`. It matches
+  the `CLAUDE_CODE_` prefix used to undo nested-session plumbing, so it was
+  being removed in exactly the headless case it exists to serve, and the
+  resulting failure was indistinguishable from the nesting bug.
+
 ## [0.1.0] - 2026-08-22
 
 First public release.
@@ -53,5 +76,6 @@ First public release.
   happens when nesting is detected, so a deliberate `ANTHROPIC_BASE_URL` still
   works in an ordinary terminal.
 
-[Unreleased]: https://github.com/HarjjotSinghh/locum/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/HarjjotSinghh/locum/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/HarjjotSinghh/locum/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/HarjjotSinghh/locum/releases/tag/v0.1.0

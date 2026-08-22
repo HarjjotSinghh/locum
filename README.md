@@ -186,6 +186,13 @@ Boots a throwaway instance on port 8799 and exercises discovery, dynamic
 registration, the consent gate, PKCE enforcement, single-use codes, token
 exchange, refresh, and an authenticated MCP `initialize`. 13 assertions.
 
+```bash
+uv run --with fastmcp --with uvicorn python3 test_jobs.py
+```
+
+Covers the job registry: ordering, status filtering, limits, truncation, and the
+`LOCUM_MAX_JOBS` cap. 18 assertions. Neither suite needs `claude` installed.
+
 ## Tools
 
 | Tool | Purpose |
@@ -194,6 +201,7 @@ exchange, refresh, and an authenticated MCP `initialize`. 13 assertions.
 | `resume_claude(session_id, prompt, cwd?)` | Continue a session. Reuses the prompt cache -- always prefer for follow-ups. |
 | `delegate_to_codex(prompt, cwd, model?)` | Same contract, via Codex CLI. |
 | `check_job(job_id)` | Poll. Returns status, turn count, recent tool activity, result. |
+| `list_jobs(limit?, status?)` | Recent jobs, newest first. Confirms work really ran, recovers a lost `job_id`, finds a `session_id` to resume. |
 | `cancel_job(job_id)` | Kill a runaway job. |
 
 Everything is async. MCP tool calls time out long before a real coding task

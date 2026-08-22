@@ -57,6 +57,7 @@ PORT = int(os.environ.get("LOCUM_PORT", "8791"))
 PERMISSION_MODE = os.environ.get("LOCUM_PERMISSION_MODE", "acceptEdits")
 JOB_TIMEOUT = int(os.environ.get("LOCUM_JOB_TIMEOUT", "1800"))
 MAX_CONCURRENT = int(os.environ.get("LOCUM_MAX_CONCURRENT", "2"))
+MAX_JOBS = int(os.environ.get("LOCUM_MAX_JOBS", "200"))
 
 if not TOKEN:
     raise SystemExit(
@@ -263,8 +264,21 @@ async def _run(job: Job, argv: list[str], on_event, finalize=None) -> None:
             job.finished = time.time()
 
 
+def _prune_jobs() -> None:
+    """Jobs live in memory for the process lifetime. Under launchd the process
+    can run for weeks, so drop the oldest finished ones once the history grows
+    past MAX_JOBS. Running jobs are never dropped: their handle is the only way
+    the client can reach them again."""
+    if len(JOBS) <= MAX_JOBS:
+        return
+    finished = [jid for jid, j in JOBS.items() if j.status != "running"]
+    for jid in finished[: len(JOBS) - MAX_JOBS]:
+        JOBS.pop(jid, None)
+
+
 def _spawn(job: Job, argv: list[str], on_event, finalize=None) -> dict[str, Any]:
     JOBS[job.id] = job
+    _prune_jobs()
     task = asyncio.create_task(_run(job, argv, on_event, finalize))
     job.proc = job.proc or None
     setattr(job, "_task", task)
@@ -378,6 +392,59 @@ async def check_job(job_id: str) -> dict:
     if not job:
         raise ValueError(f"unknown job_id {job_id!r}")
     return _snapshot(job)
+
+
+@mcp.tool
+async def list_jobs(limit: int = 10, status: str | None = None) -> dict:
+    """Recent delegated jobs, newest first.
+
+    Use it to confirm work actually ran on the operator's machine, to recover a
+    job_id you lost track of, or to find a session_id worth resuming. Prompts
+    and results are truncated here; call check_job for a job's full result.
+
+    Args:
+        limit: How many to return, newest first. Default 10, capped at 50.
+        status: Optional filter. One of running, done, error, timeout, cancelled.
+    """
+    valid = {"running", "done", "error", "timeout", "cancelled"}
+    if status is not None and status not in valid:
+        raise ValueError(f"status must be one of {sorted(valid)}, got {status!r}")
+
+    limit = max(1, min(int(limit), 50))
+    # dicts preserve insertion order, so reversing gives newest first.
+    jobs = [j for j in reversed(JOBS.values()) if status is None or j.status == status]
+
+    def clip(text: str, width: int) -> str:
+        """Slice rather than textwrap.shorten, which discards the whole string
+        when the first whitespace-delimited token is longer than width. A prompt
+        that is one long path or a base64 blob would come back as just '...'."""
+        flat = " ".join(text.split())
+        return flat if len(flat) <= width else flat[: width - 3].rstrip() + "..."
+
+    def brief(job: Job) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "job_id": job.id,
+            "kind": job.kind,
+            "status": job.status,
+            "elapsed_seconds": round((job.finished or time.time()) - job.started, 1),
+            "turns": job.turns,
+            "cwd": job.cwd,
+            "prompt": clip(job.prompt, 120),
+        }
+        if job.session_id:
+            out["session_id"] = job.session_id
+        if job.status == "done" and job.result:
+            out["result"] = clip(job.result, 200)
+        if job.error:
+            out["error"] = job.error
+        return out
+
+    return {
+        "returned": len(jobs[:limit]),
+        "matching": len(jobs),
+        "total_in_memory": len(JOBS),
+        "jobs": [brief(j) for j in jobs[:limit]],
+    }
 
 
 @mcp.tool

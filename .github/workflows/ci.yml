@@ -26,7 +26,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Byte-compile
-        run: python -m compileall -q server.py test_oauth.py
+        run: python -m compileall -q server.py test_oauth.py test_jobs.py
 
       - name: Shell syntax
         run: bash -n setup-tunnel.sh install-service.sh
@@ -46,6 +46,13 @@ jobs:
         env:
           LOCUM_ROOTS: ${{ github.workspace }}
         run: python3 test_oauth.py
+
+      # Injects jobs straight into the registry, so no `claude` is needed here
+      # either. Covers ordering, filtering, limits, truncation, and the cap.
+      - name: Job registry suite
+        env:
+          LOCUM_ROOTS: ${{ github.workspace }}
+        run: uv run --with fastmcp --with uvicorn python3 test_jobs.py
 
   secrets:
     runs-on: ubuntu-latest
