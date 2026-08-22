@@ -303,10 +303,14 @@ Grok Bot answers `Not found.` This is why the default port is **8791** and why
 the ingress rule uses `127.0.0.1`, never `localhost`. To confirm:
 
 ```bash
-lsof -nP -iTCP:<port> -sTCP:LISTEN     # who actually owns the port
-curl -s http://127.0.0.1:<port>/health # bridge answers {"ok": true}
+lsof -nPw -iTCP:<port> -sTCP:LISTEN    # who actually owns the port
+curl -s http://127.0.0.1:<port>/health # locum answers {"ok": true}
 curl -s http://localhost:<port>/health # if this differs, you have a collision
 ```
+
+`./demo-port-collision.sh` reproduces the whole thing in isolation on a port of
+your choosing, if you want to see the mechanism without waiting to be bitten by
+it.
 
 `cloudflared --loglevel debug tunnel run <name>` settles it: each request logs
 `ingressRule=` and `originService=`, so you can see whether the 404 came from
