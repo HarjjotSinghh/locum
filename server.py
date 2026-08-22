@@ -37,6 +37,8 @@ from urllib.parse import parse_qsl, quote
 
 from fastmcp import FastMCP
 
+import dashboard
+
 # ---------------------------------------------------------------- config ----
 
 def _roots() -> list[Path]:
@@ -61,6 +63,9 @@ MAX_JOBS = int(os.environ.get("LOCUM_MAX_JOBS", "200"))
 # Narrate delegated work on stdout. Uvicorn's access lines prove a request
 # arrived; they say nothing about what ran. Set to 0 for access logs only.
 NARRATE = os.environ.get("LOCUM_NARRATE", "1") not in {"0", "false", "no"}
+# Transcript depth per job, for the dashboard. Bounded because the process runs
+# for weeks and a chatty agent emits thousands of events.
+MAX_EVENTS = int(os.environ.get("LOCUM_MAX_EVENTS", "400"))
 
 # One vocabulary across both CLIs, so a caller never has to know which vendor
 # spells it which way. Claude takes --effort low|medium|high|xhigh|max; Codex
@@ -88,6 +93,19 @@ if not TOKEN:
 # ------------------------------------------------------------------ jobs ----
 
 @dataclass
+class Event:
+    """One thing the agent did, normalised across Claude and Codex so the
+    dashboard renders a single transcript format for both."""
+    t: float
+    kind: str      # tool | thinking | text | system | error | raw
+    label: str
+    detail: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"t": self.t, "kind": self.kind, "label": self.label, "detail": self.detail}
+
+
+@dataclass
 class Job:
     id: str
     kind: str                       # "claude" | "codex"
@@ -105,6 +123,9 @@ class Job:
     finished: float | None = None
     activity: deque[str] = field(default_factory=lambda: deque(maxlen=14))
     seen_labels: set[str] = field(default_factory=set)
+    events: deque[Event] = field(default_factory=lambda: deque(maxlen=MAX_EVENTS))
+    tokens: dict[str, int] = field(default_factory=dict)
+    resumed_from: str | None = None
     stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=20))
     proc: Any = None
 
@@ -132,17 +153,69 @@ def _require(binary: str) -> str:
     return path
 
 
+# Live subscribers for the dashboard. Each is a bounded queue: a browser that
+# stops reading must never block the agent that is producing events.
+SUBSCRIBERS: set[asyncio.Queue] = set()
+
+
+def _broadcast(payload: dict[str, Any]) -> None:
+    for q in list(SUBSCRIBERS):
+        try:
+            q.put_nowait(payload)
+        except asyncio.QueueFull:
+            pass
+
+
 def _log(line: str) -> None:
     if NARRATE:
         print(f"{time.strftime('%H:%M:%S')}  {line}", flush=True)
 
 
-def _activity(job: Job, text: str) -> None:
-    """Record an agent action and narrate it. The deque is what check_job
-    returns; the log line is what a human watching the server sees."""
+def _activity(job: Job, text: str, kind: str = "tool", detail: str = "") -> None:
+    """Record an agent action once, for all three consumers: check_job's
+    recent_activity, the dashboard transcript, and the server log. Routing
+    everything through here is what keeps them from drifting apart."""
     text = " ".join(text.split())
     job.activity.append(text)
+    ev = Event(t=time.time(), kind=kind, label=text[:120], detail=detail)
+    job.events.append(ev)
+    _broadcast({"type": "event", "job_id": job.id, "event": ev.as_dict()})
     _log(f"     {text[:100]}")
+
+
+def _clip(text: str, width: int) -> str:
+    """Slice rather than textwrap.shorten, which discards the whole string when
+    the first whitespace-delimited token is longer than width."""
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= width else flat[: width - 3].rstrip() + "..."
+
+
+def _brief(job: Job) -> dict[str, Any]:
+    """One row's worth of a job. Shared by list_jobs, the dashboard table, and
+    the live feed, so all three always agree."""
+    out: dict[str, Any] = {
+        "job_id": job.id,
+        "kind": job.kind,
+        "status": job.status,
+        "elapsed_seconds": round((job.finished or time.time()) - job.started, 1),
+        "started": job.started,
+        "turns": job.turns,
+        "cwd": job.cwd,
+        "prompt": _clip(job.prompt, 120),
+    }
+    for key, val in (("model", job.model), ("effort", job.effort),
+                     ("session_id", job.session_id), ("resumed_from", job.resumed_from)):
+        if val:
+            out[key] = val
+    if job.tokens:
+        out["tokens"] = dict(job.tokens)
+    if job.cost_usd is not None:
+        out["cost_usd"] = round(job.cost_usd, 4)
+    if job.status == "done" and job.result:
+        out["result"] = _clip(job.result, 200)
+    if job.error:
+        out["error"] = _clip(job.error, 200)
+    return out
 
 
 def _snapshot(job: Job) -> dict[str, Any]:
@@ -188,13 +261,36 @@ def _note_claude_event(job: Job, evt: dict[str, Any]) -> None:
     elif kind == "assistant":
         job.turns += 1
         for block in (evt.get("message") or {}).get("content") or []:
-            if block.get("type") == "tool_use":
+            btype = block.get("type")
+            if btype == "tool_use":
                 inp = block.get("input") or {}
                 detail = inp.get("file_path") or inp.get("path") or inp.get("command") or ""
-                _activity(job, f"{block.get('name')} {str(detail)[:90]}")
+                _activity(job, f"{block.get('name')} {str(detail)[:90]}",
+                          kind="tool", detail=json.dumps(inp)[:1500])
+            elif btype == "thinking":
+                text = block.get("thinking") or ""
+                if text:
+                    _activity(job, "thinking", kind="thinking", detail=text[:4000])
+            elif btype == "text":
+                text = block.get("text") or ""
+                if text.strip():
+                    _activity(job, "message", kind="text", detail=text[:4000])
+    elif kind == "user":
+        for block in (evt.get("message") or {}).get("content") or []:
+            if block.get("type") == "tool_result":
+                out = block.get("content")
+                if isinstance(out, list):
+                    out = " ".join(b.get("text", "") for b in out if isinstance(b, dict))
+                if isinstance(out, str) and out.strip():
+                    _activity(job, "result", kind="result", detail=out[:2000])
     elif kind == "result":
         job.session_id = evt.get("session_id") or job.session_id
         job.cost_usd = evt.get("total_cost_usd")
+        usage = evt.get("usage") if isinstance(evt.get("usage"), dict) else {}
+        for k in ("input_tokens", "output_tokens",
+                  "cache_creation_input_tokens", "cache_read_input_tokens"):
+            if isinstance(usage.get(k), int):
+                job.tokens[k] = usage[k]
         if evt.get("is_error"):
             job.status, job.error = "error", str(evt.get("result") or "claude reported is_error")
         else:
@@ -234,6 +330,10 @@ def _note_codex_event(job: Job, evt: Any) -> None:
 
     if label == "turn.completed":
         job.turns += 1
+        usage = evt.get("usage") if isinstance(evt.get("usage"), dict) else {}
+        for k, v in usage.items():
+            if isinstance(v, int):
+                job.tokens[k] = job.tokens.get(k, 0) + v
         return
     # In the old vocabulary the per-turn marker is agent_message; task_complete
     # fires once for the whole exec, so counting it too inflated every turn
@@ -260,10 +360,11 @@ def _note_codex_event(job: Job, evt: Any) -> None:
 
     if label == "item.completed":
         item = evt.get("item") if isinstance(evt.get("item"), dict) else {}
-        kind = item.get("type") or "item"
+        itype = item.get("type") or "item"
         detail = (item.get("command") or item.get("path")
                   or item.get("text") or item.get("title") or "")
-        _activity(job, f"{kind} {str(detail)[:90]}")
+        ekind = {"reasoning": "thinking", "agent_message": "text"}.get(itype, "tool")
+        _activity(job, f"{itype} {str(detail)[:90]}", kind=ekind, detail=str(detail)[:4000])
         return
 
     # item.started / item.updated fire constantly and say nothing item.completed
@@ -373,6 +474,7 @@ async def _run(job: Job, argv: list[str], on_event, finalize=None) -> None:
             took = f"{job.finished - job.started:.1f}s"
             cost = f" - ${job.cost_usd:.2f}" if job.cost_usd else ""
             mark = "ok" if job.status == "done" else "!!"
+            _broadcast({"type": "job", "job": _brief(job)})
             _log(f"{mark} {job.kind}  {job.id}  {job.status} - "
                  f"{job.turns} turns - {took}{cost}")
 
@@ -393,6 +495,7 @@ def _spawn(job: Job, argv: list[str], on_event, finalize=None) -> dict[str, Any]
     JOBS[job.id] = job
     _prune_jobs()
     tuning = "/".join(x for x in (job.model, job.effort) if x) or "defaults"
+    _broadcast({"type": "job", "job": _brief(job)})
     _log(f"-> {job.kind}  {job.id}  {tuning}  {job.cwd}")
     _log(f'     "{" ".join(job.prompt.split())[:110]}"')
     task = asyncio.create_task(_run(job, argv, on_event, finalize))
@@ -561,40 +664,11 @@ async def list_jobs(limit: int = 10, status: str | None = None) -> dict:
     # dicts preserve insertion order, so reversing gives newest first.
     jobs = [j for j in reversed(JOBS.values()) if status is None or j.status == status]
 
-    def clip(text: str, width: int) -> str:
-        """Slice rather than textwrap.shorten, which discards the whole string
-        when the first whitespace-delimited token is longer than width. A prompt
-        that is one long path or a base64 blob would come back as just '...'."""
-        flat = " ".join(text.split())
-        return flat if len(flat) <= width else flat[: width - 3].rstrip() + "..."
-
-    def brief(job: Job) -> dict[str, Any]:
-        out: dict[str, Any] = {
-            "job_id": job.id,
-            "kind": job.kind,
-            "status": job.status,
-            "elapsed_seconds": round((job.finished or time.time()) - job.started, 1),
-            "turns": job.turns,
-            "cwd": job.cwd,
-            "prompt": clip(job.prompt, 120),
-        }
-        if job.model:
-            out["model"] = job.model
-        if job.effort:
-            out["effort"] = job.effort
-        if job.session_id:
-            out["session_id"] = job.session_id
-        if job.status == "done" and job.result:
-            out["result"] = clip(job.result, 200)
-        if job.error:
-            out["error"] = job.error
-        return out
-
     return {
         "returned": len(jobs[:limit]),
         "matching": len(jobs),
         "total_in_memory": len(JOBS),
-        "jobs": [brief(j) for j in jobs[:limit]],
+        "jobs": [_brief(j) for j in jobs[:limit]],
     }
 
 
@@ -711,6 +785,83 @@ class AuthGateway:
         return f"{proto}://{host}"
 
     # -- routing ----------------------------------------------------------
+    # --- dashboard ---------------------------------------------------------
+    def _cookie(self) -> str:
+        """A cookie value derived from the token, so no second secret exists and
+        revoking LOCUM_TOKEN revokes dashboard access at the same moment."""
+        return hashlib.sha256(f"locum-dash:{self.token}".encode()).hexdigest()
+
+    def _has_cookie(self, scope) -> bool:
+        raw = dict(scope.get("headers") or {}).get(b"cookie", b"").decode()
+        for part in raw.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "locum_dash" and hmac.compare_digest(v, self._cookie()):
+                return True
+        return False
+
+    async def _dashboard(self, scope, receive, send, method: str):
+        if method == "POST":
+            form = dict(parse_qsl((await self._body(receive)).decode()))
+            if hmac.compare_digest(form.get("passphrase", ""), self.token):
+                return await self._send(
+                    send, 303, b"", "text/plain",
+                    extra=[(b"location", b"/dashboard"),
+                           (b"set-cookie",
+                            f"locum_dash={self._cookie()}; Path=/; HttpOnly; "
+                            f"SameSite=Lax; Max-Age=604800".encode())])
+            page = dashboard.LOGIN.format(error='<p class="err">Wrong token.</p>')
+            return await self._send(send, 401, page.encode(), "text/html; charset=utf-8")
+
+        if not self._has_cookie(scope):
+            page = dashboard.LOGIN.format(error="")
+            return await self._send(send, 200, page.encode(), "text/html; charset=utf-8")
+        return await self._send(send, 200, dashboard.PAGE.encode(), "text/html; charset=utf-8")
+
+    async def _api(self, scope, send, path: str):
+        if not self._has_cookie(scope):
+            return await self._json(send, 401, {"error": "unauthorized"})
+
+        if path == "/api/jobs":
+            jobs = [_brief(j) for j in reversed(JOBS.values())]
+            return await self._json(send, 200, {"jobs": jobs})
+
+        if path.startswith("/api/jobs/"):
+            job = JOBS.get(path.rsplit("/", 1)[-1])
+            if not job:
+                return await self._json(send, 404, {"error": "unknown job"})
+            out = _brief(job)
+            out["prompt_full"] = job.prompt
+            out["events"] = [e.as_dict() for e in job.events]
+            out["result"] = job.result
+            out["stderr_tail"] = list(job.stderr_tail)
+            return await self._json(send, 200, out)
+
+        return await self._json(send, 404, {"error": "not found"})
+
+    async def _stream(self, scope, send):
+        """Server-sent events. A bounded queue means a browser that stops
+        reading gets dropped events rather than stalling the agent."""
+        if not self._has_cookie(scope):
+            return await self._json(send, 401, {"error": "unauthorized"})
+        q: asyncio.Queue = asyncio.Queue(maxsize=256)
+        SUBSCRIBERS.add(q)
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"text/event-stream"),
+                                (b"cache-control", b"no-store"),
+                                (b"connection", b"keep-alive")]})
+        try:
+            while True:
+                try:
+                    payload = await asyncio.wait_for(q.get(), timeout=20)
+                    body = f"data: {json.dumps(payload)}\n\n".encode()
+                except asyncio.TimeoutError:
+                    body = b": keepalive\n\n"   # keeps proxies from closing it
+                await send({"type": "http.response.body", "body": body, "more_body": True})
+        except Exception:                          # noqa: BLE001  client vanished
+            pass
+        finally:
+            SUBSCRIBERS.discard(q)
+
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
@@ -720,6 +871,13 @@ class AuthGateway:
 
         if path == "/health":
             return await self._json(send, 200, {"ok": True})
+
+        if path == "/dashboard":
+            return await self._dashboard(scope, receive, send, method)
+        if path == "/api/stream":
+            return await self._stream(scope, send)
+        if path.startswith("/api/"):
+            return await self._api(scope, send, path)
 
         # Clients probe both the bare and resource-suffixed discovery paths.
         if path.startswith("/.well-known/oauth-protected-resource"):

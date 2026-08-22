@@ -26,7 +26,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Byte-compile
-        run: python -m compileall -q server.py test_oauth.py test_jobs.py
+        run: python -m compileall -q server.py dashboard.py test_oauth.py test_jobs.py
 
       - name: Shell syntax
         run: bash -n setup-tunnel.sh install-service.sh

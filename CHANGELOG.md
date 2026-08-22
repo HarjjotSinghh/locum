@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-22
+
+### Added
+
+- A dashboard at `/dashboard`. One page listing every delegated session with
+  status, model, effort, turns, duration, tokens and cost, plus a detail pane
+  showing the full transcript: each tool call with its arguments, the agent's
+  reasoning, tool results, and the final output. Running jobs stream live over
+  server-sent events.
+- `/api/jobs`, `/api/jobs/<id>` and `/api/stream` behind the same auth, for
+  anything that wants the data without the page.
+- Jobs now record a bounded transcript (`LOCUM_MAX_EVENTS`, default 400) and
+  token usage from both CLIs, so cost and depth are visible per session rather
+  than only as a total.
+- Dashboard auth reuses `LOCUM_TOKEN`, exchanged once for an HttpOnly cookie
+  derived from it. No second secret exists, and revoking the token revokes the
+  dashboard.
+
+### Changed
+
+- `list_jobs`, the dashboard table and the live feed now share one `_brief()`
+  shape, so they cannot report a job differently.
+
 ## [0.4.0] - 2026-08-22
 
 ### Added
@@ -145,7 +168,8 @@ First public release.
   happens when nesting is detected, so a deliberate `ANTHROPIC_BASE_URL` still
   works in an ordinary terminal.
 
-[Unreleased]: https://github.com/HarjjotSinghh/locum/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/HarjjotSinghh/locum/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/HarjjotSinghh/locum/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/HarjjotSinghh/locum/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/HarjjotSinghh/locum/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/HarjjotSinghh/locum/compare/v0.2.0...v0.3.0

@@ -227,6 +227,22 @@ them deliberately: high effort for architecture, subtle debugging, and anything
 touching auth or data loss, and nothing for mechanical edits. `check_job` and
 `list_jobs` echo what was actually used.
 
+## The dashboard
+
+`https://your-host/dashboard` shows every delegated session: what was asked,
+which model and effort ran it, the full transcript of tool calls, reasoning and
+output, token counts, cost, and duration. Running jobs stream in live over
+server-sent events, so it doubles as a window onto work happening right now.
+
+Sign in with the same `LOCUM_TOKEN`. It is exchanged for an HttpOnly cookie, so
+there is no second secret to manage and revoking the token revokes dashboard
+access at the same moment. Everything under `/api/` and `/dashboard` requires
+that cookie.
+
+This is also the answer to "how do I show that it is really running on my
+machine": the MCP client shows a chat, the dashboard shows the actual tool calls
+and token spend behind it.
+
 ## Watching it work
 
 The server narrates delegated jobs on stdout, so a terminal beside your MCP
