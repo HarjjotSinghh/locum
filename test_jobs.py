@@ -13,13 +13,17 @@ srv = importlib.util.module_from_spec(spec)
 sys.modules["srv"] = srv          # @dataclass resolves the module by name
 spec.loader.exec_module(srv)
 
+# LOCUM_ROOTS differs between a laptop and CI, so derive a legal cwd from the
+# server's own config rather than assuming /tmp is allowed.
+ROOT = str(srv.ROOTS[0])
+
 results = []
 def ok(label, cond, extra=""):
     print(f"  {'PASS' if cond else 'FAIL'}  {label}{'  ' + extra if extra else ''}")
     results.append(cond)
 
 def mk(jid, status, prompt="do a thing", result=None, kind="claude"):
-    j = srv.Job(id=jid, kind=kind, prompt=prompt, cwd="/tmp")
+    j = srv.Job(id=jid, kind=kind, prompt=prompt, cwd=ROOT)
     j.status = status
     j.result = result
     j.session_id = f"sess-{jid}"
@@ -98,41 +102,41 @@ srv._spawn = lambda job, argv, *a, **k: captured.update(argv=argv, job=job) or {
 srv._require = lambda binary: f"/usr/bin/{binary}"
 imp = lambda t: getattr(t, "fn", t)
 
-asyncio.run(imp(srv.delegate_to_claude)("p", cwd="/tmp", model="opus", effort="max"))
+asyncio.run(imp(srv.delegate_to_claude)("p", cwd=ROOT, model="opus", effort="max"))
 a = captured["argv"]
 ok("claude passes --model", "--model" in a and a[a.index("--model") + 1] == "opus")
 ok("claude passes --effort", "--effort" in a and a[a.index("--effort") + 1] == "max")
 ok("job records what was used",
    captured["job"].model == "opus" and captured["job"].effort == "max")
 
-asyncio.run(imp(srv.delegate_to_codex)("p", cwd="/tmp", effort="max"))
+asyncio.run(imp(srv.delegate_to_codex)("p", cwd=ROOT, effort="max"))
 a = captured["argv"]
 ok("codex uses -c, not --effort", "-c" in a and "--effort" not in a)
 ok("codex maps max onto high", 'model_reasoning_effort="high"' in a)
 # -c must precede the subcommand or codex rejects it
 ok("codex -c precedes exec", a.index("-c") < a.index("exec"))
 
-asyncio.run(imp(srv.resume_claude)("sess-1", "p", cwd="/tmp", effort="low"))
+asyncio.run(imp(srv.resume_claude)("sess-1", "p", cwd=ROOT, effort="low"))
 a = captured["argv"]
 ok("resume accepts effort", "--effort" in a and a[a.index("--effort") + 1] == "low")
 
 for bad in ("turbo", "MAXIMUM", ""):
     try:
-        asyncio.run(imp(srv.delegate_to_claude)("p", cwd="/tmp", effort=bad))
+        asyncio.run(imp(srv.delegate_to_claude)("p", cwd=ROOT, effort=bad))
         ok(f"rejects effort {bad!r}", False)
     except ValueError:
         ok(f"rejects effort {bad!r}", True)
 
-asyncio.run(imp(srv.delegate_to_claude)("p", cwd="/tmp", effort="  HIGH  "))
+asyncio.run(imp(srv.delegate_to_claude)("p", cwd=ROOT, effort="  HIGH  "))
 ok("effort is normalised", captured["job"].effort == "high")
 
-asyncio.run(imp(srv.delegate_to_claude)("p", cwd="/tmp"))
+asyncio.run(imp(srv.delegate_to_claude)("p", cwd=ROOT))
 a = captured["argv"]
 ok("omitted by default", "--effort" not in a and "--model" not in a)
 srv._spawn, srv._require = _spawn_real, _require_real
 
 print("\ncodex event parsing")
-j = srv.Job(id="cx", kind="codex", prompt="p", cwd="/tmp")
+j = srv.Job(id="cx", kind="codex", prompt="p", cwd=ROOT)
 srv._note_codex_event(j, {"type": "thread.started", "thread_id": "th-42"})
 ok("thread_id becomes session_id", j.session_id == "th-42")
 srv._note_codex_event(j, {"type": "item.completed",
