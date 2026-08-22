@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-22
+
+### Added
+
+- The server narrates delegated work on stdout: a start line with kind, job id,
+  model/effort and cwd, the prompt, every tool call the agent makes as it makes
+  it, and a finish line with status, turns, duration and reported cost.
+  Previously the only server output was uvicorn access lines, which prove a
+  request arrived and say nothing about what ran. Set `LOCUM_NARRATE=0` to
+  restore the old behaviour.
+
 ## [0.3.1] - 2026-08-22
 
 Found by delegating a review of `_note_codex_event` to Locum itself, at
@@ -134,7 +145,8 @@ First public release.
   happens when nesting is detected, so a deliberate `ANTHROPIC_BASE_URL` still
   works in an ordinary terminal.
 
-[Unreleased]: https://github.com/HarjjotSinghh/locum/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/HarjjotSinghh/locum/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/HarjjotSinghh/locum/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/HarjjotSinghh/locum/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/HarjjotSinghh/locum/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/HarjjotSinghh/locum/compare/v0.1.0...v0.2.0

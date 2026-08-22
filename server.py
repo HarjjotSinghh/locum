@@ -58,6 +58,9 @@ PERMISSION_MODE = os.environ.get("LOCUM_PERMISSION_MODE", "acceptEdits")
 JOB_TIMEOUT = int(os.environ.get("LOCUM_JOB_TIMEOUT", "1800"))
 MAX_CONCURRENT = int(os.environ.get("LOCUM_MAX_CONCURRENT", "2"))
 MAX_JOBS = int(os.environ.get("LOCUM_MAX_JOBS", "200"))
+# Narrate delegated work on stdout. Uvicorn's access lines prove a request
+# arrived; they say nothing about what ran. Set to 0 for access logs only.
+NARRATE = os.environ.get("LOCUM_NARRATE", "1") not in {"0", "false", "no"}
 
 # One vocabulary across both CLIs, so a caller never has to know which vendor
 # spells it which way. Claude takes --effort low|medium|high|xhigh|max; Codex
@@ -129,6 +132,19 @@ def _require(binary: str) -> str:
     return path
 
 
+def _log(line: str) -> None:
+    if NARRATE:
+        print(f"{time.strftime('%H:%M:%S')}  {line}", flush=True)
+
+
+def _activity(job: Job, text: str) -> None:
+    """Record an agent action and narrate it. The deque is what check_job
+    returns; the log line is what a human watching the server sees."""
+    text = " ".join(text.split())
+    job.activity.append(text)
+    _log(f"     {text[:100]}")
+
+
 def _snapshot(job: Job) -> dict[str, Any]:
     elapsed = round((job.finished or time.time()) - job.started, 1)
     out: dict[str, Any] = {
@@ -175,7 +191,7 @@ def _note_claude_event(job: Job, evt: dict[str, Any]) -> None:
             if block.get("type") == "tool_use":
                 inp = block.get("input") or {}
                 detail = inp.get("file_path") or inp.get("path") or inp.get("command") or ""
-                job.activity.append(f"{block.get('name')} {str(detail)[:90]}".strip())
+                _activity(job, f"{block.get('name')} {str(detail)[:90]}")
     elif kind == "result":
         job.session_id = evt.get("session_id") or job.session_id
         job.cost_usd = evt.get("total_cost_usd")
@@ -198,7 +214,7 @@ def _note_codex_event(job: Job, evt: Any) -> None:
     Codex output file was never cleaned up.
     """
     if not isinstance(evt, dict):
-        job.activity.append(str(evt)[:90])
+        _activity(job, str(evt)[:90])
         return
 
     msg = evt.get("msg") if isinstance(evt.get("msg"), dict) else evt
@@ -239,7 +255,7 @@ def _note_codex_event(job: Job, evt: Any) -> None:
                   or (err if isinstance(err, str) else None)
                   or label)
         job.error = str(detail)[:600]
-        job.activity.append(f"error {str(detail)[:80]}")
+        _activity(job, f"error {str(detail)[:80]}")
         return
 
     if label == "item.completed":
@@ -247,14 +263,14 @@ def _note_codex_event(job: Job, evt: Any) -> None:
         kind = item.get("type") or "item"
         detail = (item.get("command") or item.get("path")
                   or item.get("text") or item.get("title") or "")
-        job.activity.append(f"{kind} {str(detail)[:90]}".strip())
+        _activity(job, f"{kind} {str(detail)[:90]}")
         return
 
     # item.started / item.updated fire constantly and say nothing item.completed
     # does not; without this they crowd everything useful out of the deque.
     if label and label not in {"token_count", "agent_message_delta", "turn.started",
                                "thread.started", "item.started", "item.updated"}:
-        job.activity.append(label[:90])
+        _activity(job, label[:90])
 
 
 def _child_env() -> dict[str, str]:
@@ -312,13 +328,13 @@ async def _run(job: Job, argv: list[str], on_event, finalize=None) -> None:
                     try:
                         on_event(job, json.loads(line))
                     except json.JSONDecodeError:
-                        job.activity.append(line[:90])
+                        _activity(job, line[:90])
                     except Exception as exc:            # noqa: BLE001
                         # Never let a parser bug escape into the gather: that
                         # kills the reader, and _run then skips proc.wait() and
                         # finalize, leaving the child unreaped and the Codex
                         # output file on disk. Losing one event beats leaking.
-                        job.activity.append(f"unparsed event ({type(exc).__name__})")
+                        _activity(job, f"unparsed event ({type(exc).__name__})")
 
             await asyncio.wait_for(
                 asyncio.gather(read_stdout(), _pump_stderr(proc.stderr, job)),
@@ -354,6 +370,11 @@ async def _run(job: Job, argv: list[str], on_event, finalize=None) -> None:
             job.error = f"{type(exc).__name__}: {exc}"
         finally:
             job.finished = time.time()
+            took = f"{job.finished - job.started:.1f}s"
+            cost = f" - ${job.cost_usd:.2f}" if job.cost_usd else ""
+            mark = "ok" if job.status == "done" else "!!"
+            _log(f"{mark} {job.kind}  {job.id}  {job.status} - "
+                 f"{job.turns} turns - {took}{cost}")
 
 
 def _prune_jobs() -> None:
@@ -371,6 +392,9 @@ def _prune_jobs() -> None:
 def _spawn(job: Job, argv: list[str], on_event, finalize=None) -> dict[str, Any]:
     JOBS[job.id] = job
     _prune_jobs()
+    tuning = "/".join(x for x in (job.model, job.effort) if x) or "defaults"
+    _log(f"-> {job.kind}  {job.id}  {tuning}  {job.cwd}")
+    _log(f'     "{" ".join(job.prompt.split())[:110]}"')
     task = asyncio.create_task(_run(job, argv, on_event, finalize))
     job.proc = job.proc or None
     setattr(job, "_task", task)

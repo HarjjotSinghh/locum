@@ -227,6 +227,28 @@ them deliberately: high effort for architecture, subtle debugging, and anything
 touching auth or data loss, and nothing for mechanical edits. `check_job` and
 `list_jobs` echo what was actually used.
 
+## Watching it work
+
+The server narrates delegated jobs on stdout, so a terminal beside your MCP
+client shows what is actually running:
+
+```
+06:51:24  -> claude  1726b9229609  sonnet  ~/Documents/Projects/locum
+06:51:24       "How many tools does this MCP server expose? Read server.py..."
+06:51:30       Bash grep -c "@mcp.tool" ...
+06:51:33       Bash grep -n "@mcp.tool" ...
+06:51:35  ok claude  1726b9229609  done - 4 turns - 10.3s - $0.17
+```
+
+Under launchd that goes to `~/Library/Logs/locum/server.out.log`:
+
+```bash
+tail -f ~/Library/Logs/locum/server.out.log | grep -v 'INFO:'
+```
+
+Set `LOCUM_NARRATE=0` for access logs only. The log has no rotation, so on a
+long-running install either turn narration off or truncate it periodically.
+
 ## Safety
 
 `LOCUM_ROOTS` is the only barrier between a cloud agent and your home
