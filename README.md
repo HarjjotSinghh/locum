@@ -143,6 +143,8 @@ Everything is async — a coding task takes far longer than an MCP call can wait
 
 `https://your-host/dashboard` shows every session — prompt, model, transcript, tokens, cost — with running jobs streaming live. Sign in with `LOCUM_TOKEN`; there is no second secret. History and session IDs survive restarts; transcripts don't.
 
+It's a control surface too: filter the list by status, copy a session id for `resume_*`, or cancel a queued or running job from its detail pane (with a confirm — there's no undo).
+
 The server also narrates jobs on stdout. Under launchd: `tail -f ~/Library/Logs/locum/server.out.log | grep -v 'INFO:'`. Set `LOCUM_NARRATE=0` for quiet, and truncate the log now and then — it doesn't rotate.
 
 ## Safety
