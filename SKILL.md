@@ -32,8 +32,9 @@ already pasted into the conversation, or planning with no file access needed.
 3. Repeat step 2 until `status` is `done`. Report `recent_activity` to the user
    while you wait so they can see progress.
 4. For a follow-up on the same work, use `resume_claude(session_id, prompt)` --
-   never a fresh `delegate_to_claude`. Resuming reuses the prompt cache and the
-   prior context; starting cold re-pays roughly 18k tokens of setup.
+   or `resume_codex` for a Codex job -- never a fresh delegation. Resuming
+   reuses the prompt cache and the prior context; starting cold re-pays roughly
+   18k tokens of setup.
 
 ## Writing the prompt
 

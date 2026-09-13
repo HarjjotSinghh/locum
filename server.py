@@ -112,10 +112,12 @@ def _claude_autonomy() -> list[str]:
     return ["--permission-mode", PERMISSION_MODE]
 
 
-def _codex_autonomy() -> list[str]:
+def _codex_autonomy(resume: bool = False) -> list[str]:
     if AUTONOMY == "bypass":
         return ["--dangerously-bypass-approvals-and-sandbox"]
-    return ["--sandbox", "workspace-write"]
+    # `codex exec resume` accepts no --sandbox flag, so in ask mode a resume
+    # just omits the bypass flag and prompting comes back by default.
+    return [] if resume else ["--sandbox", "workspace-write"]
 
 
 def _effort(level: str | None) -> str | None:
@@ -656,17 +658,77 @@ async def delegate_to_codex(prompt: str, cwd: str | None = None,
         argv[1:1] = ["-c", f'model_reasoning_effort="{CODEX_EFFORT[effort]}"']
 
     def finalize(j: Job) -> None:
-        try:
-            if outfile.exists():
-                j.result = outfile.read_text("utf-8", "replace").strip()
-                if j.status == "running":
-                    j.status = "done"
-                outfile.unlink(missing_ok=True)
-        except OSError as exc:
-            j.error = f"could not read codex output: {exc}"
+        _finalize_codex_output(j, outfile)
 
     job = Job(id=uuid.uuid4().hex[:12], kind="codex", prompt=prompt, cwd=resolved,
               model=model, effort=effort)
+    return _spawn(job, argv, _note_codex_event, finalize)
+
+
+def _finalize_codex_output(job: Job, outfile: Path,
+                           expect_thread: str | None = None) -> None:
+    """Collect a finished Codex run: the last message from its output file.
+
+    Shared by delegate_to_codex and resume_codex. When expect_thread is set,
+    the stream must have reported that same thread id back; a bad resume id
+    can silently start a fresh thread, so a mismatch fails loudly rather than
+    reporting a cold run as a follow-up.
+    """
+    try:
+        if outfile.exists():
+            job.result = outfile.read_text("utf-8", "replace").strip()
+            if job.status == "running":
+                job.status = "done"
+            outfile.unlink(missing_ok=True)
+    except OSError as exc:
+        job.error = f"could not read codex output: {exc}"
+    if expect_thread is not None and job.session_id != expect_thread:
+        job.status = "error"
+        job.error = (
+            f"resume target mismatch: asked for thread {expect_thread!r}, "
+            f"codex reported {job.session_id!r}. Refusing to report a "
+            f"fresh thread as a follow-up."
+        )
+
+
+@mcp.tool
+async def resume_codex(session_id: str, prompt: str, cwd: str | None = None,
+                       model: str | None = None,
+                       effort: str | None = None) -> dict:
+    """Continue an earlier Codex session instead of starting cold. The twin of
+    resume_claude: it keeps prior context rather than re-paying setup. Always
+    prefer this over delegate_to_codex for follow-ups.
+
+    Fails loudly if Codex reports back a different thread id than the one
+    asked for, which is how a bad id silently starting a fresh thread shows up.
+
+    Args:
+        session_id: The session_id returned by a previous check_job.
+        prompt: The follow-up instruction.
+        cwd: Same repo as the original job.
+        model: Optional override for this turn only.
+        effort: Optional reasoning depth for this turn only. Codex has no
+            distinct "max", so it maps onto "high".
+    """
+    effort = _effort(effort)
+    resolved = _resolve_cwd(cwd)
+    outfile = Path(resolved) / f".codex-last-{uuid.uuid4().hex[:8]}.txt"
+    # `codex exec resume` takes [SESSION_ID] [PROMPT] positionally and accepts
+    # no --cd, so the working directory comes from the subprocess cwd alone.
+    argv = [_require("codex"), "exec", "resume", session_id, prompt, "--json",
+            "--skip-git-repo-check",
+            "--output-last-message", str(outfile)] + _codex_autonomy(resume=True)
+    if model:
+        argv += ["--model", model]
+    if effort:
+        argv[1:1] = ["-c", f'model_reasoning_effort="{CODEX_EFFORT[effort]}"']
+
+    def finalize(j: Job) -> None:
+        _finalize_codex_output(j, outfile, expect_thread=session_id)
+
+    job = Job(id=uuid.uuid4().hex[:12], kind="codex", prompt=prompt, cwd=resolved,
+              model=model, effort=effort)
+    job.session_id = session_id
     return _spawn(job, argv, _note_codex_event, finalize)
 
 
