@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `LOCUM_COMPLETION_WEBHOOK`: one JSON POST to the operator's own routine
+  when a job finishes (`done`, `error`, or `timeout`), so the orchestrator
+  can sleep instead of polling a long job every 30s. The payload mirrors
+  `check_job`, delivery runs off the event loop with a 10s timeout, and a
+  dead endpoint logs a line without touching the job. This is the server's
+  single permitted outbound call, and the CI secrets job now enforces that
+  it stays the only one.
 - Job metadata persistence. Every spawn, session sighting, and finish appends
   one JSON line to `~/.locum/jobs.jsonl` (`LOCUM_JOBS_FILE`), and a restart
   restores history with session ids intact, so `resume_*` outlives launchd

@@ -70,15 +70,28 @@ jobs:
 
       # Matching the hostnames as strings would flag the invariant docstring at
       # the top of server.py, so assert the behaviour instead: the server makes
-      # no outbound HTTP calls of any kind. Only the spawned CLIs talk to a
-      # vendor, using their own credentials.
-      - name: No outbound HTTP client in server
+      # no outbound HTTP calls except the operator's own completion webhook.
+      # Only the spawned CLIs talk to a vendor, using their own credentials.
+      - name: Outbound calls limited to the webhook
         run: |
-          if grep -nE '(urlopen|urlretrieve|requests\.|httpx\.|aiohttp|socket\.create_connection)' server.py; then
+          if grep -nE '(urlretrieve|requests\.|httpx\.|aiohttp|socket\.create_connection)' server.py; then
             echo "invariant 2 broken: server.py must not make outbound requests"
             exit 1
           fi
-          echo "ok: no outbound HTTP client"
+          # urlopen is allowed exactly once, on the line carrying the marker:
+          # _deliver_webhook POSTing to the operator-configured
+          # LOCUM_COMPLETION_WEBHOOK. Anything else is a second caller.
+          uses=$(grep -c 'urllib\.request\.urlopen' server.py || true)
+          marked=$(grep -c 'webhook-allowlist' server.py || true)
+          if [ "$uses" != "1" ] || [ "$marked" != "1" ]; then
+            echo "urlopen must appear exactly once, on the allowlisted webhook line"
+            exit 1
+          fi
+          if ! grep -q 'urlopen.*webhook-allowlist' server.py; then
+            echo "the urlopen line must carry the allowlist marker"
+            exit 1
+          fi
+          echo "ok: outbound calls limited to the completion webhook"
 
       - name: No credential paths opened
         run: |

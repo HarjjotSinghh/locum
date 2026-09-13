@@ -471,5 +471,113 @@ finally:
     srv.JOBS.update(_saved_jobs)
     srv.JOBS_FILE = _saved_jobs_file
 
+print("\ncompletion webhook")
+import http.server
+import threading
+received = []
+
+
+class _Hook(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        received.append({"headers": {k.lower(): v for k, v in self.headers.items()},
+                         "body": json.loads(self.rfile.read(length) or b"{}")})
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, *a):
+        pass
+
+
+_hookd = http.server.HTTPServer(("127.0.0.1", 0), _Hook)
+threading.Thread(target=_hookd.serve_forever, daemon=True).start()
+_hook_url = f"http://127.0.0.1:{_hookd.server_port}/hook"
+_saved_webhook = srv.WEBHOOK_URL
+srv.WEBHOOK_URL = _hook_url
+try:
+    srv._deliver_webhook({"job_id": "w1", "status": "done"})
+    ok("webhook delivered",
+       len(received) == 1 and received[0]["body"]["job_id"] == "w1")
+    ok("webhook posts json",
+       received[0]["headers"].get("content-type") == "application/json")
+    ua = received[0]["headers"].get("user-agent", "")
+    ok("webhook user-agent set",
+       ua.startswith("locum/") and "Python-urllib" not in ua, ua)
+
+    srv.WEBHOOK_URL = "http://127.0.0.1:1/none"
+    try:
+        srv._deliver_webhook({"job_id": "w2"})
+        ok("dead endpoint does not raise", True)
+    except Exception as e:                            # noqa: BLE001
+        ok("dead endpoint does not raise", False, repr(e))
+    srv.WEBHOOK_URL = _hook_url
+
+    async def webhook_scenario(kind):
+        srv.SEM = asyncio.Semaphore(4)
+        srv.NARRATE = False
+        srv.JOBS.clear()
+        try:
+            jid = f"w-{kind}"
+            j = srv.Job(id=jid, kind="claude", prompt="p", cwd=ROOT)
+            if kind == "cancel":
+                srv._spawn(j, [sys.executable, "-c", "import time; time.sleep(30)"],
+                           lambda j, e: None)
+                await _wait_until(lambda: j.status == "running")
+                await imp(srv.cancel_job)(jid)
+                await j._task
+                await asyncio.sleep(0.3)
+            else:
+                argv = ([sys.executable, "-c", "pass"] if kind == "done"
+                       else [sys.executable, "-c", "import sys; sys.exit(1)"])
+                srv._spawn(j, argv, lambda j, e: None)
+                await j._task
+                for _ in range(100):
+                    if any(r["body"].get("job_id") == jid for r in received):
+                        break
+                    await asyncio.sleep(0.05)
+            return j.status
+        finally:
+            srv.SEM = asyncio.Semaphore(srv.MAX_CONCURRENT)
+            srv.NARRATE = True
+
+    ok("done job completes", asyncio.run(webhook_scenario("done")) == "done")
+    hits = [r for r in received if r["body"].get("job_id") == "w-done"]
+    ok("completion fires once", len(hits) == 1, f"{len(hits)} hits")
+    ok("payload mirrors check_job",
+       hits[0]["body"].get("status") == "done" and "turns" in hits[0]["body"],
+       str(sorted(hits[0]["body"])))
+    ok("error job completes", asyncio.run(webhook_scenario("error")) == "error")
+    ehits = [r for r in received if r["body"].get("job_id") == "w-error"]
+    ok("error fires too",
+       len(ehits) == 1 and ehits[0]["body"].get("status") == "error")
+    ok("cancelled job completes",
+       asyncio.run(webhook_scenario("cancel")) == "cancelled")
+    ok("cancelled job stays silent",
+       not any(r["body"].get("job_id") == "w-cancel" for r in received))
+
+    srv.WEBHOOK_URL = ""
+
+    async def quiet_scenario():
+        srv.SEM = asyncio.Semaphore(4)
+        srv.NARRATE = False
+        srv.JOBS.clear()
+        try:
+            j = srv.Job(id="w-quiet", kind="claude", prompt="p", cwd=ROOT)
+            srv._spawn(j, [sys.executable, "-c", "pass"], lambda j, e: None)
+            await j._task
+            await asyncio.sleep(0.3)
+        finally:
+            srv.SEM = asyncio.Semaphore(srv.MAX_CONCURRENT)
+            srv.NARRATE = True
+
+    asyncio.run(quiet_scenario())
+    ok("disabled webhook stays silent",
+       not any(r["body"].get("job_id") == "w-quiet" for r in received))
+finally:
+    srv.WEBHOOK_URL = _saved_webhook
+    _hookd.shutdown()
+    _hookd.server_close()
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

@@ -228,6 +228,20 @@ them deliberately: high effort for architecture, subtle debugging, and anything
 touching auth or data loss, and nothing for mechanical edits. `check_job` and
 `list_jobs` echo what was actually used.
 
+### Completion webhook
+
+Polling is still orchestration turns: a 10-minute job polled every 30s costs
+~20 of them. Set `LOCUM_COMPLETION_WEBHOOK` to a routine of your own and the
+server POSTs one JSON payload there when a job finishes (`done`, `error`, or
+`timeout`; cancellations stay silent, since whoever cancelled is already
+awake). The payload mirrors `check_job`, so the Bot can sleep until woken and
+then call `check_job` exactly once. Delivery is best-effort with a 10s
+timeout: a dead endpoint logs a line and never affects the job.
+
+If you set one, tell the Bot's description the polls are now a fallback, not
+the plan: "once delegated, wait for the completion webhook; poll `check_job`
+only if it has not arrived."
+
 ## The dashboard
 
 `https://your-host/dashboard` shows every delegated session: what was asked,
