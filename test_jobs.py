@@ -843,7 +843,8 @@ def _doctor_cli(**kw):
     return p.returncode, p.stdout
 
 
-rc, out = _doctor_cli(LOCUM_TOKEN="x", LOCUM_ROOTS=ROOT)
+rc, out = _doctor_cli(LOCUM_TOKEN="x", LOCUM_ROOTS=ROOT,
+                     PATH=_docbin + os.pathsep + os.environ.get("PATH", ""))
 ok("cli healthy exits 0", rc == 0 and "locum doctor" in out, f"rc={rc}")
 rc, out = _doctor_cli(LOCUM_ROOTS=ROOT)
 ok("cli missing token exits 1", rc == 1 and "FAIL" in out, f"rc={rc}")
