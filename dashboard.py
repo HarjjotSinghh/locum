@@ -44,7 +44,20 @@ PAGE = """<!doctype html>
   main { flex:1; display:grid; grid-template-columns:minmax(300px,380px) 1fr; min-height:0 }
   @media (max-width:820px) { main { grid-template-columns:1fr; grid-template-rows:40% 1fr } }
 
-  #list { border-right:1px solid var(--line); overflow-y:auto; min-height:0 }
+  #leftcol { border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0; min-width:0 }
+  #listhead { padding:9px 16px; border-bottom:1px solid var(--line) }
+  #listhead select { width:100%; background:var(--panel); color:var(--fg); border:1px solid var(--line);
+                     border-radius:6px; padding:6px 8px; font:12px inherit }
+  #list { overflow-y:auto; min-height:0 }
+  .btn { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px;
+         padding:4px 11px; font:12px inherit; cursor:pointer }
+  .btn:hover { background:var(--panel-2) }
+  .btn.danger { color:var(--bad); border-color:var(--bad) }
+  .btn:disabled { opacity:.45; cursor:default }
+  #detailhead { display:flex; align-items:center; gap:10px; margin:0 0 16px }
+  #detailhead .spacer { flex:1 }
+  .okmsg { color:var(--ok); font-size:12px }
+  .errmsg { color:var(--bad); font-size:12px }
   .job {
     padding:11px 16px; border-bottom:1px solid var(--line); cursor:pointer;
     display:grid; grid-template-columns:auto 1fr auto; gap:4px 9px; align-items:baseline;
@@ -102,7 +115,18 @@ PAGE = """<!doctype html>
 </header>
 
 <main>
-  <div id="list"></div>
+  <div id="leftcol">
+    <div id="listhead"><select id="filter" aria-label="Filter by status">
+      <option value="">All statuses</option>
+      <option value="queued">Queued</option>
+      <option value="running">Running</option>
+      <option value="done">Done</option>
+      <option value="error">Error</option>
+      <option value="timeout">Timeout</option>
+      <option value="cancelled">Cancelled</option>
+    </select></div>
+    <div id="list"></div>
+  </div>
   <div id="detail"><p class="empty">Select a session.</p></div>
 </main>
 
@@ -110,6 +134,7 @@ PAGE = """<!doctype html>
 const $ = s => document.querySelector(s);
 const jobs = new Map();
 let selected = location.hash.slice(1) || null;
+let statusFilter = "";
 
 const ago = ts => {
   const d = Math.max(0, Date.now() / 1000 - ts);
@@ -120,6 +145,14 @@ const ago = ts => {
 const clock = ts => new Date(ts * 1000).toTimeString().slice(0, 8);
 const num = n => n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n);
 const esc = s => String(s ?? "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const copyText = async t => {
+  try { await navigator.clipboard.writeText(t); return true; }
+  catch { /* fall through to the legacy path */ }
+  const ta = document.createElement("textarea");
+  ta.value = t; document.body.appendChild(ta); ta.select();
+  try { return document.execCommand("copy"); } catch { return false; }
+  finally { ta.remove(); }
+};
 
 function stats() {
   const all = [...jobs.values()];
@@ -134,7 +167,9 @@ function stats() {
 }
 
 function renderList() {
-  const sorted = [...jobs.values()].sort((a, b) => b.started - a.started);
+  const sorted = [...jobs.values()]
+    .filter(j => !statusFilter || j.status === statusFilter)
+    .sort((a, b) => b.started - a.started);
   $("#list").innerHTML = sorted.map(j => `
     <div class="job" data-id="${j.job_id}" aria-selected="${j.job_id === selected}">
       <span class="dot ${j.status}"></span>
@@ -161,13 +196,18 @@ async function openDetail() {
   if (!r.ok) { $("#detail").innerHTML = `<p class="empty">Gone from memory.</p>`; return; }
   const j = await r.json();
   const tok = Object.entries(j.tokens || {}).map(([k, v]) => `${k.replace(/_tokens$/, "")} ${num(v)}`).join("  ");
+  const live = j.status === "queued" || j.status === "running";
   $("#detail").innerHTML = `
+    <div id="detailhead">
+      ${live ? `<button class="btn danger" id="cancelbtn">Cancel job</button>` : ""}
+      <span class="spacer"></span><span id="detailmsg"></span>
+    </div>
     <dl>
       <dt>job</dt><dd>${j.job_id} &middot; ${j.kind} &middot; ${j.status}</dd>
       <dt>prompt</dt><dd>${esc(j.prompt_full || j.prompt)}</dd>
       <dt>cwd</dt><dd>${esc(j.cwd)}</dd>
       ${j.model || j.effort ? `<dt>tuning</dt><dd>${esc(j.model || "default")} / ${esc(j.effort || "default")}</dd>` : ""}
-      ${j.session_id ? `<dt>session</dt><dd>${esc(j.session_id)}${j.resumed_from ? " (resumed)" : ""}</dd>` : ""}
+      ${j.session_id ? `<dt>session</dt><dd>${esc(j.session_id)}${j.resumed_from ? " (resumed)" : ""} <button class="btn" id="copybtn">copy</button></dd>` : ""}
       <dt>elapsed</dt><dd>${j.elapsed_seconds}s &middot; ${j.turns} turns${j.cost_usd ? " &middot; $" + j.cost_usd : ""}</dd>
       ${tok ? `<dt>tokens</dt><dd>${tok}</dd>` : ""}
     </dl>
@@ -175,10 +215,38 @@ async function openDetail() {
     <div class="term" id="term">${(j.events || []).map(evLine).join("") || "<span class='t'>no events recorded</span>"}</div>
     ${j.result ? `<h2>Result</h2><pre class="out">${esc(j.result)}</pre>` : ""}
     ${j.error ? `<h2>Error</h2><pre class="out">${esc(j.error)}${j.stderr_tail ? "\\n\\n" + esc(j.stderr_tail.join("\\n")) : ""}</pre>` : ""}`;
+
+  const msg = $("#detailmsg");
+  const say = (t, bad) => { if (msg) { msg.textContent = t; msg.className = bad ? "errmsg" : "okmsg"; } };
+  const cb = $("#copybtn");
+  if (cb) cb.onclick = async () => {
+    const ok = await copyText(j.session_id);
+    say(ok ? "copied session id" : "copy failed", !ok);
+  };
+  const kb = $("#cancelbtn");
+  if (kb) kb.onclick = async () => {
+    if (!confirm(`Cancel ${j.kind} job ${j.job_id}?`)) return;
+    kb.disabled = true;
+    try {
+      const cr = await fetch(`/api/jobs/${j.job_id}/cancel`,
+        { method: "POST", credentials: "same-origin" });
+      // A job that finished since this pane opened answers 200 with a note
+      // instead of "cancelling": report that, not a cancellation that
+      // never happened.
+      const result = await cr.json().catch(() => ({}));
+      const cancelling = cr.ok && result.status === "cancelling";
+      const doneMsg = result.note || `cancel failed: ${cr.status}`;
+      say(cancelling ? "cancelling…" : doneMsg, !cancelling);
+      // The live feed re-renders this pane when the job's status lands.
+      if (cancelling) setTimeout(openDetail, 800);
+    } catch { say("cancel failed: network error", true); }
+    kb.disabled = false;
+  };
 }
 
 async function boot() {
   $("#host").textContent = location.host;
+  $("#filter").onchange = e => { statusFilter = e.target.value; renderList(); };
   const r = await fetch("/api/jobs", { credentials: "same-origin" });
   (await r.json()).jobs.forEach(j => jobs.set(j.job_id, j));
   renderList();

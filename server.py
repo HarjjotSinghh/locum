@@ -405,10 +405,14 @@ def _job_from_record(rec: dict[str, Any]) -> Job:
 
 def _set_session_id(job: Job, sid: Any) -> None:
     """Record the CLI's session handle, journaling the first sighting so a
-    restart between init and finish does not lose the resume handle."""
+    restart between init and finish does not lose the resume handle. Also
+    rebroadcasts the job: the dashboard's detail header only refreshes on job
+    messages, and without this the session row (and its copy button) would
+    never appear on a pane opened before init."""
     if isinstance(sid, str) and sid and sid != job.session_id:
         job.session_id = sid
         _persist_job(job)
+        _broadcast({"type": "job", "job": _brief(job)})
 
 
 def _load_jobs() -> None:
@@ -1008,14 +1012,9 @@ async def list_jobs(limit: int = 10, status: str | None = None) -> dict:
     }
 
 
-@mcp.tool
-async def cancel_job(job_id: str) -> dict:
-    """Kill a queued or running job that has gone off the rails or is no longer
-    needed.
-
-    Args:
-        job_id: The job_id to cancel.
-    """
+def _cancel_job_by_id(job_id: str) -> dict:
+    """Shared by the cancel_job tool and the dashboard's cancel endpoint, so
+    both always mean the same thing."""
     job = JOBS.get(job_id)
     if not job:
         raise ValueError(f"unknown job_id {job_id!r}")
@@ -1024,6 +1023,17 @@ async def cancel_job(job_id: str) -> dict:
         task.cancel()
         return {"job_id": job_id, "status": "cancelling"}
     return {"job_id": job_id, "status": job.status, "note": "job was not queued or running"}
+
+
+@mcp.tool
+async def cancel_job(job_id: str) -> dict:
+    """Kill a queued or running job that has gone off the rails or is no longer
+    needed.
+
+    Args:
+        job_id: The job_id to cancel.
+    """
+    return _cancel_job_by_id(job_id)
 
 
 @mcp.tool
@@ -1175,13 +1185,24 @@ class AuthGateway:
             return await self._send(send, 200, page.encode(), "text/html; charset=utf-8")
         return await self._send(send, 200, dashboard.PAGE.encode(), "text/html; charset=utf-8")
 
-    async def _api(self, scope, send, path: str):
+    async def _api(self, scope, send, path: str, method: str):
         if not self._has_cookie(scope):
             return await self._json(send, 401, {"error": "unauthorized"})
 
         if path == "/api/jobs":
             jobs = [_brief(j) for j in reversed(JOBS.values())]
             return await self._json(send, 200, {"jobs": jobs})
+
+        if path.startswith("/api/jobs/") and path.endswith("/cancel"):
+            if method != "POST":
+                return await self._json(
+                    send, 405, {"error": "method not allowed"},
+                    extra=[(b"allow", b"POST")])
+            try:
+                return await self._json(
+                    send, 200, _cancel_job_by_id(path.split("/")[-2]))
+            except ValueError:
+                return await self._json(send, 404, {"error": "unknown job"})
 
         if path.startswith("/api/jobs/"):
             job = JOBS.get(path.rsplit("/", 1)[-1])
@@ -1249,7 +1270,7 @@ class AuthGateway:
         if path == "/api/stream":
             return await self._stream(scope, send)
         if path.startswith("/api/"):
-            return await self._api(scope, send, path)
+            return await self._api(scope, send, path, method)
 
         # Clients probe both the bare and resource-suffixed discovery paths.
         if path.startswith("/.well-known/oauth-protected-resource"):

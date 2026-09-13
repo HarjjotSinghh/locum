@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Dashboard controls: filter the session list by status, copy a session id
+  for `resume_*`, and cancel a queued or running job from its detail pane
+  (with a confirm). Cancelling goes through a new `POST /api/jobs/<id>/cancel`
+  endpoint behind the same cookie auth, sharing one helper with the
+  `cancel_job` tool so both always agree. Session sightings also rebroadcast
+  the job so the detail header (and its copy button) appears even when the
+  pane was opened before the CLI reported its session.
+
 ## [0.7.0] - 2026-09-14
 
 ### Added

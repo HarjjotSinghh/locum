@@ -655,5 +655,96 @@ else:
     ok("git annotation survives a restart",
        "made.txt" in ((srv.JOBS["g1"].git_changes or {}).get("status_short", "")))
 
+print("\ndashboard controls")
+
+
+class _FakeTask:
+    def __init__(self):
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+
+class _Send:
+    def __init__(self):
+        self.status = None
+        self.headers = {}
+        self.body = b""
+
+    async def __call__(self, msg):
+        if msg["type"] == "http.response.start":
+            self.status = msg["status"]
+            self.headers = {k.decode(): v.decode() for k, v in msg["headers"]}
+        else:
+            self.body += msg.get("body", b"")
+
+
+def _authed():
+    return {"headers": [(b"cookie", f"locum_dash={srv.AuthGateway(None, 't')._cookie()}".encode())]}
+
+
+def _api(path, method="GET", scope=None):
+    gw = srv.AuthGateway(None, "t")
+    send = _Send()
+    asyncio.run(gw._api(scope if scope is not None else _authed(), send, path, method))
+    return send.status, json.loads(send.body or b"{}"), send.headers
+
+
+srv.JOBS.clear()
+try:
+    srv._cancel_job_by_id("nope")
+    ok("helper rejects unknown jobs", False)
+except ValueError:
+    ok("helper rejects unknown jobs", True)
+mk("fin", "done", result="x")
+r = srv._cancel_job_by_id("fin")
+ok("helper leaves finished jobs", r["status"] == "done" and "note" in r)
+mk("live", "running")
+r = srv._cancel_job_by_id("live")
+ok("helper needs a task", r["status"] == "running" and "note" in r)
+srv.JOBS["live"]._task = _FakeTask()
+r = srv._cancel_job_by_id("live")
+ok("helper cancels running jobs",
+   r["status"] == "cancelling" and srv.JOBS["live"]._task.cancelled)
+mk("wait", "queued")
+srv.JOBS["wait"]._task = _FakeTask()
+r = srv._cancel_job_by_id("wait")
+ok("helper cancels queued jobs",
+   r["status"] == "cancelling" and srv.JOBS["wait"]._task.cancelled)
+r = asyncio.run(imp(srv.cancel_job)("fin"))
+ok("tool delegates to helper", r["status"] == "done" and "note" in r)
+
+s, b, _ = _api("/api/jobs/live/cancel", "POST")
+ok("endpoint cancels", s == 200 and b["status"] == "cancelling", f"{s} {b}")
+s, b, _ = _api("/api/jobs/nope/cancel", "POST")
+ok("endpoint 404s unknown jobs", s == 404, f"{s} {b}")
+s, b, h = _api("/api/jobs/live/cancel", "GET")
+ok("endpoint refuses GET", s == 405 and h.get("allow") == "POST", f"{s} {b}")
+s, b, _ = _api("/api/jobs/live/cancel", "POST", scope={"headers": []})
+ok("endpoint needs the cookie", s == 401, f"{s} {b}")
+s, b, _ = _api("/api/jobs")
+ok("jobs listing still serves", s == 200 and isinstance(b.get("jobs"), list))
+s, b, _ = _api("/api/jobs/fin")
+ok("job detail still serves", s == 200 and b.get("job_id") == "fin")
+
+srv.JOBS.clear()
+j = srv.Job(id="bs", kind="claude", prompt="p", cwd=ROOT)
+j.status = "running"
+srv.JOBS["bs"] = j
+q: asyncio.Queue = asyncio.Queue()
+srv.SUBSCRIBERS.add(q)
+try:
+    srv._note_claude_event(j, {"type": "system", "subtype": "init",
+                               "session_id": "sess-live"})
+    msg = q.get_nowait()
+    ok("session sighting rebroadcasts the job",
+       msg["type"] == "job" and msg["job"].get("session_id") == "sess-live")
+    srv._note_claude_event(j, {"type": "system", "subtype": "init",
+                               "session_id": "sess-live"})
+    ok("repeat sighting stays quiet", q.empty())
+finally:
+    srv.SUBSCRIBERS.discard(q)
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)
