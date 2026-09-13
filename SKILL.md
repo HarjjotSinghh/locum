@@ -27,6 +27,8 @@ already pasted into the conversation, or planning with no file access needed.
 
 ## How to call it
 
+0. `status()` -> confirms the server is up, shows the allowed roots and which
+   CLIs are present, and whether a slot is free. Do this once per session.
 1. `delegate_to_claude(prompt, cwd)` -> returns a `job_id` right away.
 2. Wait ~30s, then `check_job(job_id)`.
 3. Repeat step 2 until `status` is `done`. Report `recent_activity` to the user

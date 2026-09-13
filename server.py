@@ -27,6 +27,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import sys
 import time
 import urllib.request
@@ -182,6 +183,7 @@ class Job:
     tokens: dict[str, int] = field(default_factory=dict)
     resumed_from: str | None = None
     stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=20))
+    git_changes: dict[str, str] | None = None
     proc: Any = None
 
 JOBS: dict[str, Job] = {}
@@ -305,6 +307,8 @@ def _snapshot(job: Job) -> dict[str, Any]:
                        "Poll check_job again in 20-30s.")
     if job.status == "running":
         out["hint"] = "Still working. Poll check_job again in 20-30s."
+    if job.git_changes is not None:
+        out["git_changes"] = dict(job.git_changes)
     return out
 
 # ---------------------------------------------------------- persistence ----
@@ -331,6 +335,7 @@ def _job_record(job: Job) -> dict[str, Any]:
         "finished": job.finished,
         "result": _clip(job.result, RESULT_KEEP) if job.result else None,
         "error": job.error,
+        "git_changes": dict(job.git_changes) if job.git_changes else None,
     }
 
 
@@ -382,6 +387,10 @@ def _job_from_record(rec: dict[str, Any]) -> Job:
     job.effort = _str_or_none(rec.get("effort"))
     job.error = _str_or_none(rec.get("error"))
     job.result = _str_or_none(rec.get("result"))
+    gc = rec.get("git_changes")
+    job.git_changes = ({k: v for k, v in gc.items()
+                        if isinstance(k, str) and isinstance(v, str)}
+                       if isinstance(gc, dict) else None) or None
     cost = rec.get("cost_usd")
     job.cost_usd = cost if isinstance(cost, (int, float)) else None
     job.tokens = dict(rec.get("tokens")) if isinstance(rec.get("tokens"), dict) else {}
@@ -470,6 +479,31 @@ async def _fire_webhook(job: Job) -> None:
     await asyncio.to_thread(_deliver_webhook, _snapshot(job))
 
 # --------------------------------------------------------------- runners ----
+
+GIT_KEEP = 2000   # bounds the annotation; a status listing can be huge
+
+
+def _git_changes(cwd: str) -> dict[str, str] | None:
+    """Summarize what a finished job left on disk: status plus diff stat. None
+    when cwd is not a repo or git is unavailable; a clean repo yields empty
+    strings, which is an answer, not an absence. Failures stay silent because
+    this is annotation, not the result."""
+    if not shutil.which("git"):
+        return None
+    try:
+        short = subprocess.run(["git", "-C", cwd, "status", "--short"],
+                               capture_output=True, text=True, timeout=10)
+        if short.returncode != 0:
+            return None
+        stat = subprocess.run(["git", "-C", cwd, "diff", "--stat"],
+                              capture_output=True, text=True, timeout=10)
+        return {
+            "status_short": _clip(short.stdout.strip(), GIT_KEEP),
+            "diff_stat": _clip(stat.stdout.strip(), GIT_KEEP) if stat.returncode == 0 else "",
+        }
+    except Exception:                             # noqa: BLE001
+        return None
+
 
 async def _pump_stderr(stream: asyncio.StreamReader, job: Job) -> None:
     async for raw in stream:
@@ -704,6 +738,8 @@ async def _run(job: Job, argv: list[str], on_event, finalize=None) -> None:
         job.error = f"{type(exc).__name__}: {exc}"
     finally:
         job.finished = time.time()
+        if job.proc is not None:
+            job.git_changes = _git_changes(job.cwd)
         took = f"{job.finished - job.started:.1f}s"
         cost = f" - ${job.cost_usd:.2f}" if job.cost_usd else ""
         mark = "ok" if job.status == "done" else "!!"
@@ -988,6 +1024,27 @@ async def cancel_job(job_id: str) -> dict:
         task.cancel()
         return {"job_id": job_id, "status": "cancelling"}
     return {"job_id": job_id, "status": job.status, "note": "job was not queued or running"}
+
+
+@mcp.tool
+async def status() -> dict:
+    """Health and capacity of this server. Call it before delegating: it shows
+    the allowed cwd roots, which CLIs are actually on PATH, and how many jobs
+    are running or queued with how many slots free. Discovering \"claude is
+    not installed\" or \"cwd is outside the roots\" here beats discovering it
+    by failing a delegation.
+    """
+    running = sum(1 for j in JOBS.values() if j.status == "running")
+    queued = sum(1 for j in JOBS.values() if j.status == "queued")
+    return {
+        "roots": [str(r) for r in ROOTS],
+        "binaries": {"claude": shutil.which("claude"),
+                     "codex": shutil.which("codex")},
+        "running": running,
+        "queued": queued,
+        "free_slots": max(MAX_CONCURRENT - running, 0),
+        "max_concurrent": MAX_CONCURRENT,
+    }
 
 # ------------------------------------------------------------------- auth ----
 # Grok Bot's custom-connector dialog only speaks OAuth 2.1 -- it offers no static

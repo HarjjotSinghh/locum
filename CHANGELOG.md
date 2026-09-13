@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A `status` tool: allowed roots, which CLIs are on PATH, running/queued
+  counts, and free slots. The orchestrator calls it before delegating instead
+  of discovering a missing binary or a bad `cwd` by failing a delegation.
+- `git_changes` on `check_job`: when a finished job's `cwd` is a repo, the
+  snapshot carries `git status --short` and `git diff --stat` taken at
+  finish, so the Bot reports what landed on disk instead of trusting the
+  agent's writeup. A clean repo yields empty strings; a non-repo omits the
+  field. Journalled with the job, so it survives restarts too.
 - `LOCUM_COMPLETION_WEBHOOK`: one JSON POST to the operator's own routine
   when a job finishes (`done`, `error`, or `timeout`), so the orchestrator
   can sleep instead of polling a long job every 30s. The payload mirrors
