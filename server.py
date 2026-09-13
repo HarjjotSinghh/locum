@@ -156,7 +156,7 @@ class Job:
     kind: str                       # "claude" | "codex"
     prompt: str
     cwd: str
-    status: str = "running"         # running | done | error | timeout | cancelled
+    status: str = "queued"          # queued | running | done | error | timeout | cancelled
     session_id: str | None = None
     result: str | None = None
     error: str | None = None
@@ -286,6 +286,13 @@ def _snapshot(job: Job) -> dict[str, Any]:
     if job.status in {"error", "timeout"}:
         out["error"] = job.error
         out["stderr_tail"] = list(job.stderr_tail)
+    if job.status == "queued":
+        # JOBS preserves spawn order and the semaphore wakes waiters FIFO, so
+        # the index among queued jobs is the job's real position in line.
+        queued = [jid for jid, j in JOBS.items() if j.status == "queued"]
+        out["queue_position"] = queued.index(job.id) + 1 if job.id in queued else 1
+        out["hint"] = ("Waiting for a free slot behind other jobs. "
+                       "Poll check_job again in 20-30s.")
     if job.status == "running":
         out["hint"] = "Still working. Poll check_job again in 20-30s."
     return out
@@ -453,8 +460,17 @@ def _child_env() -> dict[str, str]:
 
 
 async def _run(job: Job, argv: list[str], on_event, finalize=None) -> None:
-    async with SEM:
-        try:
+    # The semaphore sits inside the try so that cancelling a queued job lands
+    # in the CancelledError branch instead of escaping with the job stuck at
+    # "queued" forever. The timeout still only covers the gather below, so
+    # queue waiting never eats into LOCUM_JOB_TIMEOUT.
+    try:
+        async with SEM:
+            job.status = "running"
+            _broadcast({"type": "job", "job": _brief(job)})
+            waited = time.time() - job.started
+            if waited > 1:
+                _log(f"~~ {job.kind}  {job.id}  started after {waited:.0f}s queued")
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=job.cwd,
@@ -501,20 +517,20 @@ async def _run(job: Job, argv: list[str], on_event, finalize=None) -> None:
                 else:
                     job.status = "done"
                     job.result = job.result or "(process exited 0 with no captured result)"
-        except asyncio.TimeoutError:
-            job.status = "timeout"
-            job.error = f"exceeded LOCUM_JOB_TIMEOUT ({JOB_TIMEOUT}s)"
-            if job.proc and job.proc.returncode is None:
-                job.proc.kill()
-        except asyncio.CancelledError:
-            job.status = "cancelled"
-            job.error = "cancelled by cancel_job"
-            if job.proc and job.proc.returncode is None:
-                job.proc.kill()
-        except Exception as exc:                      # noqa: BLE001
-            job.status = "error"
-            job.error = f"{type(exc).__name__}: {exc}"
-        finally:
+    except asyncio.TimeoutError:
+        job.status = "timeout"
+        job.error = f"exceeded LOCUM_JOB_TIMEOUT ({JOB_TIMEOUT}s)"
+        if job.proc and job.proc.returncode is None:
+            job.proc.kill()
+    except asyncio.CancelledError:
+        job.status = "cancelled"
+        job.error = "cancelled by cancel_job"
+        if job.proc and job.proc.returncode is None:
+            job.proc.kill()
+    except Exception as exc:                      # noqa: BLE001
+        job.status = "error"
+        job.error = f"{type(exc).__name__}: {exc}"
+    finally:
             job.finished = time.time()
             took = f"{job.finished - job.started:.1f}s"
             cost = f" - ${job.cost_usd:.2f}" if job.cost_usd else ""
@@ -527,11 +543,11 @@ async def _run(job: Job, argv: list[str], on_event, finalize=None) -> None:
 def _prune_jobs() -> None:
     """Jobs live in memory for the process lifetime. Under launchd the process
     can run for weeks, so drop the oldest finished ones once the history grows
-    past MAX_JOBS. Running jobs are never dropped: their handle is the only way
-    the client can reach them again."""
+    past MAX_JOBS. Queued and running jobs are never dropped: their handle is
+    the only way the client can reach them again."""
     if len(JOBS) <= MAX_JOBS:
         return
-    finished = [jid for jid, j in JOBS.items() if j.status != "running"]
+    finished = [jid for jid, j in JOBS.items() if j.status not in {"queued", "running"}]
     for jid in finished[: len(JOBS) - MAX_JOBS]:
         JOBS.pop(jid, None)
 
@@ -548,10 +564,10 @@ def _spawn(job: Job, argv: list[str], on_event, finalize=None) -> dict[str, Any]
     setattr(job, "_task", task)
     return {
         "job_id": job.id,
-        "status": "running",
+        "status": "queued",
         "cwd": job.cwd,
         "next_step": f"Call check_job('{job.id}') in about 30s. Do NOT re-delegate; "
-                     "the work is already running.",
+                     "the work is already queued.",
     }
 
 # ------------------------------------------------------------------ tools ----
@@ -734,9 +750,10 @@ async def resume_codex(session_id: str, prompt: str, cwd: str | None = None,
 
 @mcp.tool
 async def check_job(job_id: str) -> dict:
-    """Poll a delegated job. status is one of: running, done, error, timeout,
-    cancelled. While running you get turn count and recent tool activity so you
-    can report progress. Poll every 20-30s; do not busy-loop.
+    """Poll a delegated job. status is one of: queued, running, done, error,
+    timeout, cancelled. A queued job is waiting for a free slot; while running
+    you get turn count and recent tool activity so you can report progress.
+    Poll every 20-30s; do not busy-loop.
 
     Args:
         job_id: The job_id returned by a delegate_* tool.
@@ -757,9 +774,9 @@ async def list_jobs(limit: int = 10, status: str | None = None) -> dict:
 
     Args:
         limit: How many to return, newest first. Default 10, capped at 50.
-        status: Optional filter. One of running, done, error, timeout, cancelled.
+        status: Optional filter. One of queued, running, done, error, timeout, cancelled.
     """
-    valid = {"running", "done", "error", "timeout", "cancelled"}
+    valid = {"queued", "running", "done", "error", "timeout", "cancelled"}
     if status is not None and status not in valid:
         raise ValueError(f"status must be one of {sorted(valid)}, got {status!r}")
 
@@ -777,7 +794,8 @@ async def list_jobs(limit: int = 10, status: str | None = None) -> dict:
 
 @mcp.tool
 async def cancel_job(job_id: str) -> dict:
-    """Kill a running job that has gone off the rails or is no longer needed.
+    """Kill a queued or running job that has gone off the rails or is no longer
+    needed.
 
     Args:
         job_id: The job_id to cancel.
@@ -786,10 +804,10 @@ async def cancel_job(job_id: str) -> dict:
     if not job:
         raise ValueError(f"unknown job_id {job_id!r}")
     task = getattr(job, "_task", None)
-    if job.status == "running" and task:
+    if job.status in {"queued", "running"} and task:
         task.cancel()
         return {"job_id": job_id, "status": "cancelling"}
-    return {"job_id": job_id, "status": job.status, "note": "job was not running"}
+    return {"job_id": job_id, "status": job.status, "note": "job was not queued or running"}
 
 # ------------------------------------------------------------------- auth ----
 # Grok Bot's custom-connector dialog only speaks OAuth 2.1 -- it offers no static

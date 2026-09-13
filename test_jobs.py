@@ -137,6 +137,7 @@ srv._spawn, srv._require = _spawn_real, _require_real
 
 print("\ncodex event parsing")
 j = srv.Job(id="cx", kind="codex", prompt="p", cwd=ROOT)
+j.status = "running"      # parsers only ever see live jobs
 srv._note_codex_event(j, {"type": "thread.started", "thread_id": "th-42"})
 ok("thread_id becomes session_id", j.session_id == "th-42")
 srv._note_codex_event(j, {"type": "item.completed",
@@ -150,7 +151,9 @@ ok("turn.failed leaves status to _run", j.status == "running")
 
 print("\ncodex parser hardening")
 def fresh():
-    return srv.Job(id="cx", kind="codex", prompt="p", cwd=ROOT)
+    j = srv.Job(id="cx", kind="codex", prompt="p", cwd=ROOT)
+    j.status = "running"      # parsers only ever see live jobs
+    return j
 
 for label, evt in [("bare string", "error"), ("number", 123), ("list", ["a"]),
                    ("error as string", {"type": "turn.failed", "error": "boom"}),
@@ -236,6 +239,7 @@ print("\nresume thread mismatch")
 import tempfile
 def roundtrip(expect, reported):
     j = srv.Job(id="rx", kind="codex", prompt="p", cwd=ROOT)
+    j.status = "running"         # finalize only runs on live jobs
     j.session_id = reported      # what the event stream carried back
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
         f.write("last message")
@@ -254,6 +258,7 @@ ok("fresh thread fails loudly",
    j.status == "error" and "th-OTHER" in (j.error or "") and "th-1" in (j.error or ""),
    (j.error or "")[:80])
 j = srv.Job(id="dx", kind="codex", prompt="p", cwd=ROOT)
+j.status = "running"         # finalize only runs on live jobs
 j.session_id = "whatever"
 with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
     f.write("fresh run")
@@ -261,6 +266,87 @@ with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
 srv._finalize_codex_output(j, out)
 out.unlink(missing_ok=True)
 ok("fresh delegate ignores thread check", j.status == "done" and j.result == "fresh run")
+
+print("\nqueued vs running")
+ok("new jobs start queued",
+   srv.Job(id="nq", kind="claude", prompt="p", cwd=ROOT).status == "queued")
+
+srv.JOBS.clear()
+mk("only-q", "queued")
+r = call(status="queued")
+ok("filters by queued", r["returned"] == 1 and r["jobs"][0]["job_id"] == "only-q")
+
+srv.JOBS.clear()
+mk("keepq", "queued")
+for i in range(20):
+    mk(f"old{i}", "done", result="x")
+    srv._prune_jobs()
+ok("queued job never pruned", "keepq" in srv.JOBS)
+
+async def _wait_until(pred, timeout=15):
+    start = time.time()
+    while not pred():
+        if time.time() - start > timeout:
+            return False
+        await asyncio.sleep(0.02)
+    return True
+
+async def queue_scenario():
+    srv.SEM = asyncio.Semaphore(1)
+    srv.NARRATE = False
+    srv.JOBS.clear()
+    try:
+        noop = lambda j, e: None
+        argv = [sys.executable, "-c", "import time; time.sleep(0.4)"]
+        j1 = srv.Job(id="q1", kind="claude", prompt="p", cwd=ROOT)
+        j2 = srv.Job(id="q2", kind="claude", prompt="p", cwd=ROOT)
+        r1 = srv._spawn(j1, argv, noop)
+        r2 = srv._spawn(j2, argv, noop)
+        at_spawn = (j1.status, j2.status)
+        started = await _wait_until(lambda: j1.status == "running")
+        mid = (j1.status, j2.status)
+        snap = await imp(srv.check_job)("q2")
+        await asyncio.gather(j1._task, j2._task)
+        return r1, r2, at_spawn, started, mid, snap, (j1.status, j2.status)
+    finally:
+        srv.SEM = asyncio.Semaphore(srv.MAX_CONCURRENT)
+        srv.NARRATE = True
+
+r1, r2, at_spawn, started, mid, snap, end = asyncio.run(queue_scenario())
+ok("_spawn reports queued", r1["status"] == "queued" and r2["status"] == "queued")
+ok("next_step says queued", "already queued" in r1["next_step"])
+ok("both queued at spawn", at_spawn == ("queued", "queued"), f"got {at_spawn}")
+ok("first job observed running", started)
+ok("second job queues behind it", mid == ("running", "queued"), f"got {mid}")
+ok("check_job reports queued with a position",
+   snap["status"] == "queued" and snap["queue_position"] == 1, str(snap))
+ok("queued hint points at the slot", "free slot" in snap["hint"])
+ok("queued job runs after", end == ("done", "done"), f"got {end}")
+
+async def cancel_queued_scenario():
+    srv.SEM = asyncio.Semaphore(1)
+    srv.NARRATE = False
+    srv.JOBS.clear()
+    try:
+        noop = lambda j, e: None
+        argv = [sys.executable, "-c", "import time; time.sleep(30)"]
+        j1 = srv.Job(id="c1", kind="claude", prompt="p", cwd=ROOT)
+        j2 = srv.Job(id="c2", kind="claude", prompt="p", cwd=ROOT)
+        srv._spawn(j1, argv, noop)
+        srv._spawn(j2, argv, noop)
+        started = await _wait_until(lambda: j1.status == "running")
+        res = await imp(srv.cancel_job)("c2")
+        await imp(srv.cancel_job)("c1")
+        await asyncio.gather(j1._task, j2._task, return_exceptions=True)
+        return started, res, (j1.status, j2.status)
+    finally:
+        srv.SEM = asyncio.Semaphore(srv.MAX_CONCURRENT)
+        srv.NARRATE = True
+
+started, res, end = asyncio.run(cancel_queued_scenario())
+ok("cancel accepts a queued job", res["status"] == "cancelling")
+ok("queued cancel lands", end[1] == "cancelled", f"got {end}")
+ok("running cancel still lands", end[0] == "cancelled", f"got {end}")
 
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)
