@@ -29,6 +29,7 @@ import secrets
 import shutil
 import sys
 import time
+import urllib.request
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
@@ -102,6 +103,10 @@ MAX_EVENTS = int(os.environ.get("LOCUM_MAX_EVENTS", "400"))
 # status, cost) that history and resume_* survive a restart.
 JOBS_FILE = Path(os.environ.get("LOCUM_JOBS_FILE",
                                 str(Path.home() / ".locum" / "jobs.jsonl"))).expanduser()
+# POST one JSON payload here when a job finishes, so the orchestrator can
+# sleep instead of polling. Empty disables it. This is the operator's own
+# routine, not a vendor API, and the payload carries no credentials.
+WEBHOOK_URL = os.environ.get("LOCUM_COMPLETION_WEBHOOK", "").strip()
 
 # One vocabulary across both CLIs, so a caller never has to know which vendor
 # spells it which way. Claude takes --effort low|medium|high|xhigh|max; Codex
@@ -439,6 +444,31 @@ def _load_jobs() -> None:
 
 _load_jobs()
 
+# ------------------------------------------------------------ completion ----
+
+def _deliver_webhook(payload: dict[str, Any]) -> None:
+    """POST one completion payload to the operator's own routine. This is the
+    single permitted outbound call in the server (see the CI allowlist): the
+    target is LOCUM_COMPLETION_WEBHOOK, never a vendor API, and the payload
+    carries no credentials. Best-effort; failures log and move on."""
+    req = urllib.request.Request(
+        WEBHOOK_URL, data=json.dumps(payload).encode(), method="POST",
+        headers={"Content-Type": "application/json",
+                 # Cloudflare 1010-bans the default Python-urllib signature.
+                 "User-Agent": f"locum/{__version__}"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:  # webhook-allowlist
+            resp.read(1024)
+    except Exception as exc:                      # noqa: BLE001
+        _log(f"!! completion webhook failed: {type(exc).__name__}: {exc}")
+
+
+async def _fire_webhook(job: Job) -> None:
+    """Deliver one completion payload off the event loop, so a slow or dead
+    endpoint never stalls job completion. The payload mirrors check_job, so
+    the orchestrator can wake up and call check_job exactly once."""
+    await asyncio.to_thread(_deliver_webhook, _snapshot(job))
+
 # --------------------------------------------------------------- runners ----
 
 async def _pump_stderr(stream: asyncio.StreamReader, job: Job) -> None:
@@ -679,6 +709,11 @@ async def _run(job: Job, argv: list[str], on_event, finalize=None) -> None:
         mark = "ok" if job.status == "done" else "!!"
         _broadcast({"type": "job", "job": _brief(job)})
         _persist_job(job)
+        # Fire-and-forget: the job is already terminal, and a slow endpoint
+        # must not stall completion. Cancelled jobs stay silent; the caller
+        # that cancelled them is already awake.
+        if WEBHOOK_URL and job.status in {"done", "error", "timeout"}:
+            asyncio.create_task(_fire_webhook(job))
         _log(f"{mark} {job.kind}  {job.id}  {job.status} - "
              f"{job.turns} turns - {took}{cost}")
 
