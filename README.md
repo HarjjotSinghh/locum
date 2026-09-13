@@ -10,7 +10,7 @@ Grok Bot is a good chatbot and an expensive coder. Locum lets it hand real codin
 
 Grok Bot lives in xAI's cloud, so it can't see `localhost`. It reaches Locum over a tunnel, as a custom MCP connector — a documented Grok feature, not a hack.
 
-![How a delegation flows](docs/architecture.png)
+![How a delegation flows](docs/architecture.svg)
 
 Not affiliated with xAI, Anysphere, OpenAI, or Anthropic.
 
@@ -37,7 +37,7 @@ Anything that breaks one of these is the wrong feature.
 
 You need `claude` and `codex` already signed in, plus [uv](https://docs.astral.sh/uv/).
 
-![Running in three steps](docs/setup.png)
+![Running in three steps](docs/setup.svg)
 
 **1. Start the server.**
 
@@ -120,7 +120,7 @@ cwd must be an absolute path inside an allowed root.
 
 ## How a job runs
 
-![One job, start to finish](docs/lifecycle.png)
+![One job, start to finish](docs/lifecycle.svg)
 
 Everything is async — a coding task takes far longer than an MCP call can wait. `delegate_*` hands back a `job_id` immediately; the job sits in `queued` until a slot frees, then runs. The Bot checks `check_job` every ~30s for status, turns, and recent activity — or skips polling entirely: set `LOCUM_COMPLETION_WEBHOOK` and Locum pings your routine once when the job finishes. Follow-ups go through `resume_claude` / `resume_codex` with the old `session_id`, never a fresh delegation.
 
