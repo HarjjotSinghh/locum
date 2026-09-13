@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import hashlib
 import hmac
 import json
@@ -27,6 +28,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -37,7 +39,7 @@ from dataclasses import dataclass, field
 from html import escape
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, quote
+from urllib.parse import parse_qsl, quote, urlparse
 
 from fastmcp import FastMCP
 
@@ -59,11 +61,216 @@ def _read_version() -> str:
 
 __version__ = _read_version()
 
+
+def _doctor_checks() -> list[tuple[str, str, str]]:
+    """Setup self-check, one (name, detail, level) per line, level in
+    ok/warn/fail. Reads the environment directly instead of the imported
+    config: --doctor must work in exactly the setups where the server itself
+    refuses to boot. Never prints secrets: token length, never the token, and
+    webhook host, never the URL."""
+    out: list[tuple[str, str, str]] = []
+    add = out.append
+
+    vi = sys.version_info
+    if vi >= (3, 11):
+        add(("python", f"{vi.major}.{vi.minor}.{vi.micro}", "ok"))
+    else:
+        add(("python", f"{vi.major}.{vi.minor} (need >= 3.11)", "fail"))
+
+    tok = os.environ.get("LOCUM_TOKEN", "")
+    if tok:
+        add(("token", f"set ({len(tok)} chars)", "ok"))
+    else:
+        add(("token", "LOCUM_TOKEN is not set", "fail"))
+
+    raw = os.environ.get("LOCUM_ROOTS", str(Path.home() / "Documents" / "Projects"))
+    roots = [Path(c.strip()).expanduser().resolve() for c in raw.split(":") if c.strip()]
+    if not roots:
+        add(("roots", "LOCUM_ROOTS resolved to nothing", "fail"))
+    else:
+        missing = [str(r) for r in roots if not r.is_dir()]
+        if missing:
+            add(("roots", f"missing: {', '.join(missing)}", "fail"))
+        else:
+            add(("roots", ", ".join(map(str, roots)), "ok"))
+
+    found = False
+    for binary in ("claude", "codex"):
+        path = shutil.which(binary)
+        if not path:
+            add((binary, "not on PATH", "warn"))
+            continue
+        found = True
+        try:
+            proc = subprocess.run([path, "--version"], capture_output=True,
+                                  text=True, timeout=10)
+            ver = ((proc.stdout or proc.stderr).strip().splitlines() or [""])[0][:60]
+            if proc.returncode == 0 and ver:
+                add((binary, f"{path} ({ver})", "ok"))
+            else:
+                add((binary, f"{path} (--version failed)", "warn"))
+        except (OSError, subprocess.TimeoutExpired):
+            add((binary, f"{path} (no version answer)", "warn"))
+    if not found:
+        add(("agents", "neither claude nor codex is on PATH", "fail"))
+
+    uv = shutil.which("uv")
+    add(("uv", uv or "not on PATH (the launchd plist needs it)",
+         "ok" if uv else "warn"))
+
+    port_raw = os.environ.get("LOCUM_PORT", "8791")
+    try:
+        port = int(port_raw)
+        if not 1 <= port <= 65535:
+            raise ValueError("out of range")
+        s = socket.socket()
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                add(("port", f"{port} in use (the server may already be running)", "ok"))
+            else:
+                add(("port", f"cannot bind {port}: {exc.strerror or exc}", "warn"))
+        else:
+            add(("port", f"{port} free", "ok"))
+        finally:
+            s.close()
+    except ValueError:
+        add(("port", f"LOCUM_PORT={port_raw!r} is not a usable port (want 1-65535)",
+             "fail"))
+
+    jf = Path(os.environ.get("LOCUM_JOBS_FILE",
+                             str(Path.home() / ".locum" / "jobs.jsonl"))).expanduser()
+    if jf.exists():
+        try:
+            lines = jf.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            add(("journal", f"{jf} unreadable: {exc}", "fail"))
+            lines = None
+        if lines is not None and not os.access(jf, os.W_OK):
+            add(("journal", f"{jf} is not writable: history would be silently lost",
+                 "fail"))
+            lines = None
+        if lines is not None:
+            ids = set()
+            for line in lines:
+                try:
+                    rec = json.loads(line)
+                    if isinstance(rec, dict) and rec.get("job_id"):
+                        ids.add(rec["job_id"])
+                except ValueError:
+                    pass
+            add(("journal", f"{jf} ({len(ids)} jobs)", "ok"))
+    else:
+        probe = jf.parent
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        if os.access(probe, os.W_OK):
+            add(("journal", f"absent, will be created at {jf}", "ok"))
+        else:
+            add(("journal", f"{jf.parent} is not writable", "fail"))
+
+    hook = os.environ.get("LOCUM_COMPLETION_WEBHOOK", "").strip()
+    if not hook:
+        add(("webhook", "not set, disabled", "ok"))
+    else:
+        try:
+            parts = urlparse(hook)
+            host = parts.hostname
+            parts.port  # raises ValueError on a malformed explicit port
+        except ValueError:
+            parts, host = None, None
+        if parts is not None and parts.scheme in {"http", "https"} and host:
+            add(("webhook", f"set ({parts.scheme}://{host})", "ok"))
+        else:
+            add(("webhook", "not an http(s) URL", "fail"))
+
+    autonomy = os.environ.get("LOCUM_AUTONOMY", "bypass").strip().lower()
+    if autonomy in {"bypass", "ask"}:
+        add(("autonomy", autonomy, "ok"))
+    else:
+        add(("autonomy", f"{autonomy!r} (want bypass or ask)", "fail"))
+
+    shorts = {"LOCUM_JOB_TIMEOUT": "timeout", "LOCUM_MAX_CONCURRENT": "concurrency",
+              "LOCUM_MAX_JOBS": "max_jobs", "LOCUM_MAX_EVENTS": "max_events"}
+    defaults = {"LOCUM_JOB_TIMEOUT": "1800", "LOCUM_MAX_CONCURRENT": "2",
+                "LOCUM_MAX_JOBS": "200", "LOCUM_MAX_EVENTS": "400"}
+    for var, default in defaults.items():
+        try:
+            iv = int(os.environ.get(var, default))
+        except ValueError:
+            add((shorts[var], f"{var}={os.environ.get(var)!r} is not a number", "fail"))
+            continue
+        if var == "LOCUM_MAX_CONCURRENT":
+            if iv < 1:
+                add(("concurrency", f"{iv} (want >= 1)", "fail"))
+            else:
+                add(("concurrency", str(iv), "ok"))
+        elif var == "LOCUM_JOB_TIMEOUT":
+            if iv <= 0:
+                add(("timeout", f"{iv} (every job would time out at once)", "fail"))
+            else:
+                add(("timeout", f"{iv}s", "ok"))
+        elif var == "LOCUM_MAX_EVENTS":
+            if iv < 0:
+                add(("max_events", f"{iv} (negative breaks the transcript deque)",
+                     "fail"))
+            # Silent when valid.
+        # max_jobs: silent when valid.
+
+    if sys.platform == "darwin":
+        plist = Path.home() / "Library/LaunchAgents/co.harjot.locum.plist"
+        if not plist.exists():
+            add(("launchd", "agent not installed (manual runs only)", "ok"))
+        else:
+            try:
+                proc = subprocess.run(
+                    ["launchctl", "print", f"gui/{os.getuid()}/co.harjot.locum"],
+                    capture_output=True, text=True, timeout=10)
+                if proc.returncode == 0 and re.search(r"^\s*state\s*=\s*running",
+                                                      proc.stdout, re.M):
+                    add(("launchd", "agent installed and running", "ok"))
+                elif proc.returncode == 0:
+                    add(("launchd", "agent installed but not running", "warn"))
+                else:
+                    add(("launchd", "agent installed, state unknown", "warn"))
+            except (OSError, subprocess.TimeoutExpired):
+                add(("launchd", "agent installed, state unknown", "warn"))
+
+    return out
+
+
+def _run_doctor() -> int:
+    """Print the checks and answer 0 unless something fails. Warnings never
+    fail the run: one missing CLI is worth knowing, not worth blocking on."""
+    checks = _doctor_checks()
+    print("locum doctor")
+    width = max([len(name) for name, _, _ in checks] + [0])
+    for name, detail, level in checks:
+        mark = {"ok": "", "warn": "  !!", "fail": "  FAIL"}[level]
+        print(f"  {name:<{width}}  {detail}{mark}")
+    bad = sum(1 for _, _, level in checks if level == "fail")
+    warns = sum(1 for _, _, level in checks if level == "warn")
+    print()
+    if bad:
+        print(f"{bad} problem{'s' if bad != 1 else ''} — fix the FAIL lines above.")
+    elif warns:
+        print(f"ok with {warns} warning{'s' if warns != 1 else ''}.")
+    else:
+        print("all good.")
+    return 1 if bad else 0
+
+
 # Before the config below: that raises SystemExit when LOCUM_TOKEN is unset, so
 # a version check placed after it would demand a secret to answer.
 if __name__ == "__main__" and {"--version", "-V"} & set(sys.argv[1:]):
     print(f"locum {__version__}")
     sys.exit(0)
+
+# --doctor answers up here for the same reason: it exists to diagnose exactly
+# the setups where the server refuses to boot.
+if __name__ == "__main__" and "--doctor" in sys.argv[1:]:
+    sys.exit(_run_doctor())
 
 # ---------------------------------------------------------------- config ----
 

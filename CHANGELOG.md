@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `server.py --doctor`: a setup self-check covering the token, roots, both
+  CLIs with versions, the port, the journal, the webhook URL, the numeric
+  knobs, and the launchd agent on macOS. It reads the environment directly
+  so it works in exactly the setups where the server refuses to boot, never
+  prints secrets, and exits nonzero when something fails.
 - Dashboard controls: filter the session list by status, copy a session id
   for `resume_*`, and cancel a queued or running job from its detail pane
   (with a confirm). Cancelling goes through a new `POST /api/jobs/<id>/cancel`
