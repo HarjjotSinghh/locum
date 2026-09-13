@@ -97,6 +97,11 @@ NARRATE = os.environ.get("LOCUM_NARRATE", "1") not in {"0", "false", "no"}
 # Transcript depth per job, for the dashboard. Bounded because the process runs
 # for weeks and a chatty agent emits thousands of events.
 MAX_EVENTS = int(os.environ.get("LOCUM_MAX_EVENTS", "400"))
+# Job metadata journal: one JSON object per line, last line per id wins. Full
+# transcripts stay in memory only; this carries just enough (session ids,
+# status, cost) that history and resume_* survive a restart.
+JOBS_FILE = Path(os.environ.get("LOCUM_JOBS_FILE",
+                                str(Path.home() / ".locum" / "jobs.jsonl"))).expanduser()
 
 # One vocabulary across both CLIs, so a caller never has to know which vendor
 # spells it which way. Claude takes --effort low|medium|high|xhigh|max; Codex
@@ -297,6 +302,143 @@ def _snapshot(job: Job) -> dict[str, Any]:
         out["hint"] = "Still working. Poll check_job again in 20-30s."
     return out
 
+# ---------------------------------------------------------- persistence ----
+
+RESULT_KEEP = 2000   # bounds the journal; full results live in memory only
+PROMPT_KEEP = 4000
+
+
+def _job_record(job: Job) -> dict[str, Any]:
+    return {
+        "job_id": job.id,
+        "kind": job.kind,
+        "prompt": _clip(job.prompt, PROMPT_KEEP),
+        "cwd": job.cwd,
+        "status": job.status,
+        "session_id": job.session_id,
+        "resumed_from": job.resumed_from,
+        "model": job.model,
+        "effort": job.effort,
+        "cost_usd": job.cost_usd,
+        "tokens": dict(job.tokens),
+        "turns": job.turns,
+        "started": job.started,
+        "finished": job.finished,
+        "result": _clip(job.result, RESULT_KEEP) if job.result else None,
+        "error": job.error,
+    }
+
+
+def _persist_job(job: Job) -> None:
+    """Append one metadata line. Best-effort: a failure here must never break
+    the job itself, so it logs and moves on."""
+    try:
+        JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if not JOBS_FILE.exists():
+            JOBS_FILE.touch()
+            os.chmod(JOBS_FILE, 0o600)
+        with open(JOBS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(_job_record(job)) + "\n")
+    except OSError as exc:
+        _log(f"!! persist {job.id} failed: {exc}")
+
+
+def _rewrite_jobs_file() -> None:
+    """Compact the journal back to one line per live job. Runs after pruning
+    and after loading, so the append-only file cannot grow without bound."""
+    try:
+        JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(JOBS_FILE, "w", encoding="utf-8") as f:
+            for job in JOBS.values():
+                f.write(json.dumps(_job_record(job)) + "\n")
+        os.chmod(JOBS_FILE, 0o600)
+    except OSError as exc:
+        _log(f"!! compact jobs file failed: {exc}")
+
+
+def _str_or_none(v: Any) -> str | None:
+    return v if isinstance(v, str) else None
+
+
+def _job_from_record(rec: dict[str, Any]) -> Job:
+    """Rebuild a job from one journal line. Defensive about types: the file
+    outlives the process, so it can predate whatever wrote it."""
+    kind = rec.get("kind")
+    prompt = rec.get("prompt")
+    cwd = rec.get("cwd")
+    job = Job(id=rec["job_id"],
+              kind=kind if isinstance(kind, str) else "claude",
+              prompt=prompt if isinstance(prompt, str) else "",
+              cwd=cwd if isinstance(cwd, str) else "")
+    job.status = rec.get("status") if isinstance(rec.get("status"), str) else "done"
+    job.session_id = _str_or_none(rec.get("session_id"))
+    job.resumed_from = _str_or_none(rec.get("resumed_from"))
+    job.model = _str_or_none(rec.get("model"))
+    job.effort = _str_or_none(rec.get("effort"))
+    job.error = _str_or_none(rec.get("error"))
+    job.result = _str_or_none(rec.get("result"))
+    cost = rec.get("cost_usd")
+    job.cost_usd = cost if isinstance(cost, (int, float)) else None
+    job.tokens = dict(rec.get("tokens")) if isinstance(rec.get("tokens"), dict) else {}
+    turns = rec.get("turns")
+    job.turns = turns if isinstance(turns, int) else 0
+    started = rec.get("started")
+    job.started = started if isinstance(started, (int, float)) else time.time()
+    finished = rec.get("finished")
+    job.finished = finished if isinstance(finished, (int, float)) else None
+    return job
+
+
+def _set_session_id(job: Job, sid: Any) -> None:
+    """Record the CLI's session handle, journaling the first sighting so a
+    restart between init and finish does not lose the resume handle."""
+    if isinstance(sid, str) and sid and sid != job.session_id:
+        job.session_id = sid
+        _persist_job(job)
+
+
+def _load_jobs() -> None:
+    """Restore job metadata from the previous process, if any. Jobs that were
+    still queued or running died with it; they come back as errors with their
+    session ids intact, so resume_* can still follow up on the CLI session."""
+    try:
+        lines = JOBS_FILE.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        _log(f"!! load jobs file failed: {exc}")
+        return
+    latest: dict[str, dict[str, Any]] = {}
+    for line in lines:
+        try:
+            rec = json.loads(line)
+            if isinstance(rec, dict) and rec.get("job_id"):
+                latest[rec["job_id"]] = rec
+        except ValueError:
+            continue
+    restored = []
+    for rec in latest.values():
+        try:
+            restored.append(_job_from_record(rec))
+        except (KeyError, TypeError):
+            continue
+    for job in restored:
+        if job.status in {"queued", "running"}:
+            was = job.status
+            job.status, job.finished = "error", time.time()
+            job.error = (f"locum restarted while this job was {was}; "
+                         "it did not survive the restart")
+    restored.sort(key=lambda j: j.started, reverse=True)
+    # Insert oldest-first: the registry reads newest-first off insertion order.
+    for job in reversed(restored[:MAX_JOBS]):
+        JOBS[job.id] = job
+    if restored:
+        _log(f".. restored {len(JOBS)} jobs from {JOBS_FILE}")
+        _rewrite_jobs_file()
+
+
+_load_jobs()
+
 # --------------------------------------------------------------- runners ----
 
 async def _pump_stderr(stream: asyncio.StreamReader, job: Job) -> None:
@@ -309,7 +451,7 @@ async def _pump_stderr(stream: asyncio.StreamReader, job: Job) -> None:
 def _note_claude_event(job: Job, evt: dict[str, Any]) -> None:
     kind = evt.get("type")
     if kind == "system" and evt.get("subtype") == "init":
-        job.session_id = evt.get("session_id") or job.session_id
+        _set_session_id(job, evt.get("session_id"))
     elif kind == "assistant":
         job.turns += 1
         for block in (evt.get("message") or {}).get("content") or []:
@@ -336,7 +478,7 @@ def _note_claude_event(job: Job, evt: dict[str, Any]) -> None:
                 if isinstance(out, str) and out.strip():
                     _activity(job, "result", kind="result", detail=out[:2000])
     elif kind == "result":
-        job.session_id = evt.get("session_id") or job.session_id
+        _set_session_id(job, evt.get("session_id"))
         job.cost_usd = evt.get("total_cost_usd")
         usage = evt.get("usage") if isinstance(evt.get("usage"), dict) else {}
         for k in ("input_tokens", "output_tokens",
@@ -373,8 +515,7 @@ def _note_codex_event(job: Job, evt: Any) -> None:
     # Read identifiers from whichever envelope carries them.
     for src in (evt, msg):
         found = src.get("thread_id") or src.get("session_id") or src.get("conversation_id")
-        if isinstance(found, str) and found:
-            job.session_id = found
+        _set_session_id(job, found)
 
     # Counting both vocabularies double-counts an old-protocol turn, since
     # agent_message and task_complete both fire for the same turn.
@@ -468,6 +609,7 @@ async def _run(job: Job, argv: list[str], on_event, finalize=None) -> None:
         async with SEM:
             job.status = "running"
             _broadcast({"type": "job", "job": _brief(job)})
+            _persist_job(job)
             waited = time.time() - job.started
             if waited > 1:
                 _log(f"~~ {job.kind}  {job.id}  started after {waited:.0f}s queued")
@@ -531,13 +673,14 @@ async def _run(job: Job, argv: list[str], on_event, finalize=None) -> None:
         job.status = "error"
         job.error = f"{type(exc).__name__}: {exc}"
     finally:
-            job.finished = time.time()
-            took = f"{job.finished - job.started:.1f}s"
-            cost = f" - ${job.cost_usd:.2f}" if job.cost_usd else ""
-            mark = "ok" if job.status == "done" else "!!"
-            _broadcast({"type": "job", "job": _brief(job)})
-            _log(f"{mark} {job.kind}  {job.id}  {job.status} - "
-                 f"{job.turns} turns - {took}{cost}")
+        job.finished = time.time()
+        took = f"{job.finished - job.started:.1f}s"
+        cost = f" - ${job.cost_usd:.2f}" if job.cost_usd else ""
+        mark = "ok" if job.status == "done" else "!!"
+        _broadcast({"type": "job", "job": _brief(job)})
+        _persist_job(job)
+        _log(f"{mark} {job.kind}  {job.id}  {job.status} - "
+             f"{job.turns} turns - {took}{cost}")
 
 
 def _prune_jobs() -> None:
@@ -550,10 +693,12 @@ def _prune_jobs() -> None:
     finished = [jid for jid, j in JOBS.items() if j.status not in {"queued", "running"}]
     for jid in finished[: len(JOBS) - MAX_JOBS]:
         JOBS.pop(jid, None)
+    _rewrite_jobs_file()
 
 
 def _spawn(job: Job, argv: list[str], on_event, finalize=None) -> dict[str, Any]:
     JOBS[job.id] = job
+    _persist_job(job)
     _prune_jobs()
     tuning = "/".join(x for x in (job.model, job.effort) if x) or "defaults"
     _broadcast({"type": "job", "job": _brief(job)})

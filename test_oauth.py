@@ -1,5 +1,5 @@
 """Exercise the locum OAuth flow exactly as an MCP client would."""
-import base64, hashlib, json, secrets, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import base64, hashlib, json, os, secrets, subprocess, sys, tempfile, time, urllib.error, urllib.parse, urllib.request
 
 BASE, TOK = "http://127.0.0.1:8799", "smoketest-token"
 REDIRECT = "https://grok.com/connectors/oauth/callback"
@@ -31,7 +31,11 @@ def ok(label, cond, extra=""):
 proc = subprocess.Popen(
     ["uv", "run", "server.py"],
     cwd=str(__import__("pathlib").Path(__file__).parent),
-    env={**__import__("os").environ, "LOCUM_TOKEN": TOK, "LOCUM_PORT": "8799"},
+    env={**os.environ, "LOCUM_TOKEN": TOK, "LOCUM_PORT": "8799",
+         # The throwaway server restores the journal at import; keep it away
+         # from the operator's real history.
+         "LOCUM_JOBS_FILE": os.path.join(
+             tempfile.gettempdir(), f"locum-oauth-test-{os.getpid()}.jsonl")},
     stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
 )
 for _ in range(60):
