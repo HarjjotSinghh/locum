@@ -6,123 +6,65 @@
 
 *A locum is a qualified professional who temporarily does someone else's job.*
 
-Lets Grok Bot delegate coding work to the Claude Code and Codex CLIs you are
-already logged into on your own machine, instead of burning Grok Bot usage on
-its own agent loop.
+Grok Bot is a good chatbot and an expensive coder. Locum lets it hand real coding work to the Claude Code and Codex CLIs already logged in on your machine, instead of burning its own usage grinding through your repo itself.
 
-Not affiliated with or endorsed by xAI, Anysphere, OpenAI, or Anthropic.
+Grok Bot lives in xAI's cloud, so it can't see `localhost`. It reaches Locum over a tunnel, as a custom MCP connector — a documented Grok feature, not a hack.
 
-Grok Bot runs on a persistent computer in xAI's cloud, so it cannot see
-`localhost`. It reaches this server over a tunnel, as a **custom MCP connector** --
-a documented Grok feature, not a workaround.
+![How a delegation flows](docs/architecture.png)
 
-```
-Grok Bot (xAI cloud)
-   └─ MCP tool call ──► tunnel ──► this server (your Mac)
-                                      ├─ spawns `claude -p`   (your Claude sub)
-                                      └─ spawns `codex exec`  (your ChatGPT sub)
-```
+Not affiliated with xAI, Anysphere, OpenAI, or Anthropic.
 
-## Why this is allowed, and where the line is
+## The rules
 
-Anthropic's [Claude Code legal page](https://code.claude.com/docs/en/legal-and-compliance)
-draws the boundary explicitly:
-
-> Advertised usage limits for Pro and Max plans assume **ordinary, individual
-> usage of Claude Code and the Agent SDK**.
-
-> Anthropic does not permit third-party developers to offer Claude.ai login or to
-> **route requests through Free, Pro, or Max plan credentials on behalf of their
-> users**.
-
-So:
+This only works because it's *your* machine, *your* subscriptions, *your* work. [Anthropic's legal page](https://code.claude.com/docs/en/legal-and-compliance) says Pro/Max plans assume ordinary individual use, and forbids routing other people's requests through your plan's credentials.
 
 | | |
 |---|---|
 | ✅ | You, your machine, your subscription, your own work |
-| ❌ | Hosting this so other people's requests hit **your** subscription |
-| ⚠️ | Sharing the code so others run it on **their own** subscription -- fine only while the invariants below hold |
+| ❌ | Letting other people's requests hit your subscription |
+| ⚠️ | Sharing this code so others run it on their own setup — fine, as long as the rules below hold |
 
-**Invariants. Do not remove them; they are the reason this is legal.**
+Four invariants. They never come out:
 
-1. Never read credential files, keychains, or OAuth tokens.
+1. Never touch credential files, keychains, or OAuth tokens.
 2. Never call `api.anthropic.com` / `api.openai.com` directly.
-3. Only ever spawn the official `claude` / `codex` binaries, authenticated by the
-   operator through the vendors' own login flows.
-4. Single-operator: one bearer token, one allowlist of workspace roots.
+3. Only spawn the official `claude` / `codex` binaries, logged in by you.
+4. Single operator: one token, one list of allowed folders.
 
-If a change would break one of these, it is the wrong change.
+Anything that breaks one of these is the wrong feature.
 
 ## Setup
 
-Requires `claude` and `codex` already signed in, plus [uv](https://docs.astral.sh/uv/).
+You need `claude` and `codex` already signed in, plus [uv](https://docs.astral.sh/uv/).
+
+![Running in three steps](docs/setup.png)
+
+**1. Start the server.**
 
 ```bash
-cp .env.example .env          # then set a real token and your roots
+cp .env.example .env   # set LOCUM_TOKEN and LOCUM_ROOTS
 set -a && source .env && set +a
 uv run server.py
 ```
 
-Tunnel it (Cloudflare quick tunnels do **not** carry SSE; this server uses
-Streamable HTTP, so they work fine):
+**2. Open the tunnel.**
 
 ```bash
 brew install cloudflared
 cloudflared tunnel --url http://127.0.0.1:8791
 ```
 
-That quick tunnel is fine for a first run, but it hands out a new hostname on
-every restart and Grok stores the URL -- so you would re-register and re-consent
-every time. For anything ongoing, take a stable hostname instead (needs a domain
-already on your Cloudflare account):
+Quick tunnels get a new URL on every restart, and Grok stores the URL — fine for a first try, annoying forever. For a stable hostname (needs a domain on your Cloudflare account):
 
 ```bash
-cloudflared tunnel login          # browser, once
+cloudflared tunnel login
 ./setup-tunnel.sh locum.example.com
 cloudflared tunnel run locum
 ```
 
-`setup-tunnel.sh` is idempotent: it creates the named tunnel if missing, points
-DNS at it, and writes `~/.cloudflared/config.yml`.
+**3. Add the connector.** In Grok: Connectors → New Connector → Custom, with your tunnel URL plus `/mcp`.
 
-To keep the tunnel up across reboots, use the script, not `cloudflared service
-install`:
-
-```bash
-sudo ./install-service.sh
-```
-
-`cloudflared service install` writes a launchd plist containing only the binary
-path, with no `tunnel run` subcommand, so the daemon crash-loops while your
-user-level tunnel quietly masks the failure. `install-service.sh` writes the
-plist itself and verifies `/health` before claiming success.
-
-That keeps the tunnel up. To keep the **server** up as well, so a reboot does not
-leave a healthy hostname pointing at nothing:
-
-```bash
-./install-agent.sh        # no sudo: it must run as you
-```
-
-Two macOS requirements, both of which fail confusingly if missed:
-
-- If this checkout is under `~/Documents`, `~/Desktop`, or `~/Downloads`, grant
-  **Full Disk Access to `uv`**. launchd agents do not inherit your terminal's
-  TCC grants, and TCC judges the executable launchd starts.
-- Run `claude setup-token` and put the result in `.env` as
-  `CLAUDE_CODE_OAUTH_TOKEN`. A launchd agent does not get your login session's
-  credential access, so delegation fails with "OAuth session expired" even
-  though the server itself starts fine.
-
-Register at `grok.com/connectors` -> **New Connector** -> **Custom**, with the
-tunnel URL plus `/mcp`.
-
-Grok's custom connectors speak **OAuth 2.1 only** -- the dialog has no static
-header field. The bridge therefore ships its own minimal authorization server,
-so there is no third-party OAuth app to create. Grok discovers the endpoints via
-`/.well-known/oauth-authorization-server` and self-registers over RFC 7591.
-
-If Grok still shows the manual "OAuth Credentials Required" form, fill it as:
+Grok only speaks OAuth 2.1 for custom connectors, so Locum ships its own tiny authorization server — nothing to register anywhere. It usually self-configures; if Grok shows a manual form instead:
 
 | Field | Value |
 |---|---|
@@ -133,23 +75,27 @@ If Grok still shows the manual "OAuth Credentials Required" form, fill it as:
 | Scopes | `mcp` |
 | Token Auth Method | `none (PKCE only)` |
 
-You'll then get a consent screen. It shows the redirect target -- check it says
-`grok.com` before approving -- and asks for a passphrase: paste your
-`LOCUM_TOKEN`.
+You'll get a consent screen showing where you're redirecting (check it says `grok.com`) and asking for a passphrase — that's your `LOCUM_TOKEN`. This gate matters: `/authorize` sits on a public tunnel, and without it anyone with the URL could mint a token and run commands on your machine.
 
-That passphrase gate is load-bearing. `/authorize` sits on a public tunnel;
-without it, anyone who learned the URL could mint a token and get shell access
-to your machine.
+### Staying up after a reboot
 
-### Making the Bot actually use it
+Two scripts, two jobs:
 
-A connector only makes the tools *available*. Without an instruction to prefer
-them, the Bot keeps grinding through its own loop and you save nothing. Two
-levers, and the weaker one is the one people reach for first.
+```bash
+sudo ./install-service.sh   # keeps the tunnel up (don't use `cloudflared service install` — it writes a broken plist)
+./install-agent.sh          # keeps the server up; no sudo, it must run as you
+```
 
-**1. The Bot's description (strongest).** Create a dedicated Bot, then
-**Bot actions → Edit Profile → Description**. That field is for rules that
-should remain true, so it applies to every conversation without being invoked:
+Two macOS gotchas that fail confusingly:
+
+- If the checkout is under Documents/Desktop/Downloads, give **Full Disk Access to `uv`**. Launchd agents don't inherit your terminal's permissions.
+- Run `claude setup-token` and save it as `CLAUDE_CODE_OAUTH_TOKEN` in `.env`. Without it, delegation fails with "OAuth session expired" even though the server starts fine.
+
+### Make the Bot actually use it
+
+A connector only makes the tools *available*. If you don't tell the Bot to prefer them, it keeps doing the work itself and you save nothing.
+
+**Bot description (this is the one that matters).** New Bot → Edit Profile → Description, and paste something like:
 
 ```
 You have the `locum` connector, which delegates work to the operator's own
@@ -164,222 +110,80 @@ whether a slot is free.
 
 delegate_to_claude returns a job_id immediately. Poll check_job about every 30s
 and report recent_activity so progress is visible. Never re-delegate a job that
-is still queued or running. For follow-ups on the same work use resume_claude with the
-session_id, never a fresh delegation (resume_codex for Codex jobs).
+is still queued or running. For follow-ups on the same work use resume_claude
+with the session_id, never a fresh delegation (resume_codex for Codex jobs).
 
 cwd must be an absolute path inside an allowed root.
 ```
 
-**2. A saved Skill (the detail).** `SKILL.md` in this repo covers how to write a
-good delegation prompt and what to do when a job errors. Save it by asking a Bot
-"save this as a skill called delegate-to-locum" with the file contents pasted,
-then enable it under **Settings → Plugins → Yours**. Invoke explicitly with `/`
-in the composer when you want it applied to a specific task.
+**Skill (nice to have).** `SKILL.md` teaches good delegation prompts. Ask a Bot to save it as a skill called `delegate-to-locum`, then enable it under Settings → Plugins → Yours.
 
-Use both. The description guarantees the behaviour; the skill improves the
-quality of the prompts the Bot writes.
+## How a job runs
 
-## Tests
+![One job, start to finish](docs/lifecycle.png)
 
-```bash
-python3 test_oauth.py
-```
-
-Boots a throwaway instance on port 8799 and exercises discovery, dynamic
-registration, the consent gate, PKCE enforcement, single-use codes, token
-exchange, refresh, and an authenticated MCP `initialize`. 13 assertions.
-
-```bash
-uv run --with fastmcp --with uvicorn python3 test_jobs.py
-```
-
-Covers the job registry: ordering, status filtering, limits, truncation, and the
-`LOCUM_MAX_JOBS` cap. 18 assertions. Neither suite needs `claude` installed.
+Everything is async — a coding task takes far longer than an MCP call can wait. `delegate_*` hands back a `job_id` immediately; the job sits in `queued` until a slot frees, then runs. The Bot checks `check_job` every ~30s for status, turns, and recent activity — or skips polling entirely: set `LOCUM_COMPLETION_WEBHOOK` and Locum pings your routine once when the job finishes. Follow-ups go through `resume_claude` / `resume_codex` with the old `session_id`, never a fresh delegation.
 
 ## Tools
 
 | Tool | Purpose |
 |---|---|
 | `delegate_to_claude(prompt, cwd, model?, effort?)` | Start a Claude Code job. Returns `job_id` immediately. |
-| `resume_claude(session_id, prompt, cwd?, model?, effort?)` | Continue a session. Reuses the prompt cache -- always prefer for follow-ups. |
+| `resume_claude(session_id, prompt, cwd?, model?, effort?)` | Continue a session. Reuses the prompt cache — always prefer for follow-ups. |
 | `delegate_to_codex(prompt, cwd, model?, effort?)` | Same contract, via Codex CLI. |
 | `resume_codex(session_id, prompt, cwd?, model?, effort?)` | Continue a Codex session. Fails loudly if Codex reports back a different thread. |
-| `check_job(job_id)` | Poll. Returns status, queue position while queued, turn count, recent tool activity, result — plus `git_changes` when `cwd` is a repo. |
+| `check_job(job_id)` | Poll. Returns status, queue position, turns, activity, result — plus `git_changes` when `cwd` is a repo. |
 | `list_jobs(limit?, status?)` | Recent jobs, newest first. Confirms work really ran, recovers a lost `job_id`, finds a `session_id` to resume. |
 | `cancel_job(job_id)` | Kill a runaway job. |
 | `status()` | Roots, which CLIs are on PATH, running/queued counts, free slots. Call before delegating. |
 
-Everything is async. MCP tool calls time out long before a real coding task
-finishes, so `delegate_*` returns a handle and the Bot polls. This is the single
-thing that makes the integration work at all.
+`effort` is one vocabulary across both CLIs (`low` / `medium` / `high` / `max`; Codex maps `max` onto `high`). `model` passes straight through. Both cost real quota, so raise them on purpose, not by habit.
 
-### Model and reasoning effort
+## Dashboard
 
-`effort` takes one vocabulary across both CLIs, so a caller never has to know
-which vendor spells it which way:
+`https://your-host/dashboard` shows every session — prompt, model, transcript, tokens, cost — with running jobs streaming live. Sign in with `LOCUM_TOKEN`; there is no second secret. History and session IDs survive restarts; transcripts don't.
 
-| `effort` | Claude | Codex |
-|---|---|---|
-| `low` / `medium` / `high` | `--effort <level>` | `-c model_reasoning_effort="<level>"` |
-| `max` | `--effort max` | `-c model_reasoning_effort="high"` (no distinct max) |
-
-`model` passes through unvalidated, since vendors add models faster than any
-allowlist survives. Claude takes aliases (`opus`, `sonnet`, `fable`) or full
-names; Codex takes its own.
-
-Both are optional and both cost real quota, so the skill tells the Bot to raise
-them deliberately: high effort for architecture, subtle debugging, and anything
-touching auth or data loss, and nothing for mechanical edits. `check_job` and
-`list_jobs` echo what was actually used.
-
-### Completion webhook
-
-Polling is still orchestration turns: a 10-minute job polled every 30s costs
-~20 of them. Set `LOCUM_COMPLETION_WEBHOOK` to a routine of your own and the
-server POSTs one JSON payload there when a job finishes (`done`, `error`, or
-`timeout`; cancellations stay silent, since whoever cancelled is already
-awake). The payload mirrors `check_job`, so the Bot can sleep until woken and
-then call `check_job` exactly once. Delivery is best-effort with a 10s
-timeout: a dead endpoint logs a line and never affects the job.
-
-If you set one, tell the Bot's description the polls are now a fallback, not
-the plan: "once delegated, wait for the completion webhook; poll `check_job`
-only if it has not arrived."
-
-## The dashboard
-
-`https://your-host/dashboard` shows every delegated session: what was asked,
-which model and effort ran it, the full transcript of tool calls, reasoning and
-output, token counts, cost, and duration. Running jobs stream in live over
-server-sent events, so it doubles as a window onto work happening right now.
-
-Sign in with the same `LOCUM_TOKEN`. It is exchanged for an HttpOnly cookie, so
-there is no second secret to manage and revoking the token revokes dashboard
-access at the same moment. Everything under `/api/` and `/dashboard` requires
-that cookie.
-
-This is also the answer to "how do I show that it is really running on my
-machine": the MCP client shows a chat, the dashboard shows the actual tool calls
-and token spend behind it.
-
-Job metadata is journalled to `~/.locum/jobs.jsonl`, so the history above and
-every `session_id` survive a restart; transcripts do not, and jobs that were
-mid-flight come back as errors saying so.
-
-## Watching it work
-
-The server narrates delegated jobs on stdout, so a terminal beside your MCP
-client shows what is actually running:
-
-```
-06:51:24  -> claude  1726b9229609  sonnet  ~/Documents/Projects/locum
-06:51:24       "How many tools does this MCP server expose? Read server.py..."
-06:51:30       Bash grep -c "@mcp.tool" ...
-06:51:33       Bash grep -n "@mcp.tool" ...
-06:51:35  ok claude  1726b9229609  done - 4 turns - 10.3s - $0.17
-```
-
-Under launchd that goes to `~/Library/Logs/locum/server.out.log`:
-
-```bash
-tail -f ~/Library/Logs/locum/server.out.log | grep -v 'INFO:'
-```
-
-Set `LOCUM_NARRATE=0` for access logs only. The log has no rotation, so on a
-long-running install either turn narration off or truncate it periodically.
+The server also narrates jobs on stdout. Under launchd: `tail -f ~/Library/Logs/locum/server.out.log | grep -v 'INFO:'`. Set `LOCUM_NARRATE=0` for quiet, and truncate the log now and then — it doesn't rotate.
 
 ## Safety
 
-Locum runs agents autonomously by default, because a delegated job has nobody
-at the keyboard: an approval prompt does not pause the work, it hangs the job
-until it times out. `LOCUM_AUTONOMY=bypass` passes
-`--dangerously-skip-permissions` to Claude and
-`--dangerously-bypass-approvals-and-sandbox` to Codex.
+Delegated jobs run autonomously (`LOCUM_AUTONOMY=bypass`): nobody is at the keyboard, so an approval prompt wouldn't pause the job, it would hang it until timeout. That means the agent can run anything as you — `LOCUM_ROOTS` only controls where the job *starts*.
 
-Be clear-eyed about what that buys and costs. The agent can run any command as
-your user. `LOCUM_ROOTS` bounds the directory a job *starts* in, and it is still
-the check that stops a caller pointing a job at `~/.ssh`, but a shell command
-the agent runs is not confined by it.
+What protects you, in order: your `LOCUM_TOKEN`, narrow `LOCUM_ROOTS`, and running this only for yourself. `LOCUM_AUTONOMY=ask` restores prompting, but Grok Bot can't answer prompts, so jobs will hang.
 
-What actually protects you, in order:
+## Tests
 
-1. `LOCUM_TOKEN`, which gates both the consent screen and every MCP call
-2. `LOCUM_ROOTS`, kept narrow
-3. Running this only for yourself, on your own machine
+```bash
+python3 test_oauth.py                                      # auth flow, 13 checks
+uv run --with fastmcp --with uvicorn python3 test_jobs.py # jobs, 125 checks
+```
 
-`LOCUM_AUTONOMY=ask` restores prompting, but only use it from a client that can
-surface the prompts. Grok Bot cannot, so jobs will hang.
-
-Every token comparison uses `hmac.compare_digest`. Authorization codes are
-single-use and expire in 120s. PKCE `S256` is required -- `plain` is refused.
-`/health` and the discovery documents are the only unauthenticated routes;
-`LOCUM_TOKEN` itself also remains a valid bearer token, which is what makes
-`curl` smoke tests work.
+Neither needs `claude` installed.
 
 ## Troubleshooting
 
-**Everything 404s, including `/health`, but the tunnel says it is connected.**
-Port collision. The Grok Bot desktop app listens on `[::1]:8787`, and macOS
-resolves `localhost` to `::1` before `127.0.0.1` -- so an ingress pointed at
-`http://localhost:8787` silently reaches Grok Bot instead of the bridge, and
-Grok Bot answers `Not found.` This is why the default port is **8791** and why
-the ingress rule uses `127.0.0.1`, never `localhost`. To confirm:
+**Everything 404s, even `/health`.** Port collision — something else owns the port. (The Grok Bot desktop app squats on `[::1]:8787`, which is why the default is 8791.) Check:
 
 ```bash
-lsof -nPw -iTCP:<port> -sTCP:LISTEN    # who actually owns the port
-curl -s http://127.0.0.1:<port>/health # locum answers {"ok": true}
-curl -s http://localhost:<port>/health # if this differs, you have a collision
+lsof -nPw -iTCP:<port> -sTCP:LISTEN
+curl -s http://127.0.0.1:<port>/health   # locum answers {"ok": true}
 ```
 
-`./demo-port-collision.sh` reproduces the whole thing in isolation on a port of
-your choosing, if you want to see the mechanism without waiting to be bitten by
-it.
+**Jobs fail with "OAuth session expired".** First run `claude -p "reply with OK"` yourself — if that fails, just `claude /login`. If it works standalone but not through Locum, the server was started inside a Claude Code session; restart it from a normal terminal.
 
-`cloudflared --loglevel debug tunnel run <name>` settles it: each request logs
-`ingressRule=` and `originService=`, so you can see whether the 404 came from
-cloudflared's catch-all or from whatever is actually on the port.
-
-**Jobs fail with "OAuth session expired and could not be refreshed".** Check the
-boring cause first: run `claude -p "reply with OK"` yourself. If that fails too,
-your Claude Code login has genuinely expired and `claude /login` fixes it. Locum
-surfaces the CLI's error verbatim, so this looks identical to a Locum bug.
-
-If `claude -p` works standalone but fails through Locum, then the
-server was launched from inside a Claude Code session. Claude Code exports
-`CLAUDECODE`, a `CLAUDE_CODE_*` family, and `ANTHROPIC_BASE_URL` into every
-child process; a `claude` that inherits them believes it is a nested child
-session and tries to delegate auth to a host socket that is not listening.
-`_child_env()` strips those when nesting is detected, but some sandboxed hosts
-broker Claude's credentials entirely in-process, and there a spawned `claude`
-has nothing on disk to authenticate with no matter what the environment says.
-Run the server from an ordinary terminal.
-
-**Cloudflare returns 403 with `error code: 1010`.** Cloudflare bans the default
-`Python-urllib` User-Agent signature. Only that signature -- curl, Go, Node,
-okhttp, and an absent User-Agent all pass, so MCP clients are unaffected. Set a
-User-Agent on any Python tooling you point at the tunnel:
-
-```python
-urllib.request.Request(url, headers={"User-Agent": "locum-check/1.0"})
-```
+**Cloudflare 403, error 1010.** Cloudflare blocks Python's default User-Agent. Anything calling the tunnel from Python needs `headers={"User-Agent": "something/1.0"}`. MCP clients are unaffected.
 
 ## Honest limits
 
-- Cuts Grok Bot usage, does not zero it -- orchestration turns still meter. The
-  win is collapsing ~50 Bot steps into one tool call plus a few polls.
-- Your machine must be awake with the tunnel up.
-- Quick-tunnel URLs change on restart; `./setup-tunnel.sh` gives you a stable
-  hostname so the connector survives.
-- Cold delegation re-pays ~18k tokens of `CLAUDE.md` + system prompt setup.
-  `resume_claude` avoids it.
+- Cuts Grok Bot usage, doesn't zero it. The win is ~50 Bot steps becoming one delegation plus a few polls.
+- Your machine has to be awake with the tunnel up.
+- Cold starts re-pay ~18k tokens of setup. Resume instead.
 
 ## Project
 
-- [How it works](https://www.harjotrana.com/blog/locum-grok-bot-provider-adapter),
-  the architecture writeup, with diagrams and the three bugs that cost the most time
+- [How it works](https://www.harjotrana.com/blog/locum-grok-bot-provider-adapter), the architecture writeup
 - [CONTRIBUTING.md](CONTRIBUTING.md), development setup and the four invariants
-- [SECURITY.md](SECURITY.md), threat model and how to report a vulnerability.
-  Read this before exposing Locum to a tunnel
+- [SECURITY.md](SECURITY.md), threat model and how to report a vulnerability
 - [CHANGELOG.md](CHANGELOG.md)
 
 Licensed under [Apache 2.0](LICENSE).

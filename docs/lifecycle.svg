@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="380" viewBox="0 0 960 380" font-family="-apple-system, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#6e6e78"/>
+    </marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#7ec699"/>
+    </marker>
+  </defs>
+  <rect x="1" y="1" width="958" height="378" rx="16" fill="#0b0b0d" stroke="#26262c"/>
+  <text x="32" y="46" font-size="20" font-weight="600" fill="#e7e7ea">One job, start to finish</text>
+  <text x="32" y="70" font-size="13" fill="#9a9aa4">The Bot delegates once, then polls &#8212; or sleeps until the webhook wakes it.</text>
+
+  <rect x="24" y="120" width="146" height="68" rx="10" fill="#141417" stroke="#26262c"/>
+  <text x="97" y="150" font-size="13" fill="#e7e7ea" text-anchor="middle" font-family="ui-monospace, Menlo, Consolas, monospace">delegate_*</text>
+  <text x="97" y="168" font-size="11" fill="#9a9aa4" text-anchor="middle">returns job_id</text>
+
+  <line x1="172" y1="154" x2="203" y2="154" stroke="#6e6e78" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <rect x="205" y="120" width="120" height="68" rx="10" fill="none" stroke="#e0b568" stroke-dasharray="5 4"/>
+  <text x="265" y="150" font-size="14" font-weight="600" fill="#e7e7ea" text-anchor="middle">queued</text>
+  <text x="265" y="168" font-size="11" fill="#9a9aa4" text-anchor="middle">waits for a slot</text>
+
+  <line x1="327" y1="154" x2="358" y2="154" stroke="#6e6e78" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <rect x="360" y="120" width="150" height="68" rx="10" fill="#141417" stroke="#e0b568"/>
+  <text x="435" y="150" font-size="14" font-weight="600" fill="#e7e7ea" text-anchor="middle">running</text>
+  <text x="435" y="168" font-size="11" fill="#9a9aa4" text-anchor="middle">CLI is working</text>
+
+  <line x1="512" y1="154" x2="543" y2="154" stroke="#6e6e78" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <rect x="545" y="120" width="130" height="68" rx="10" fill="#141417" stroke="#7ec699"/>
+  <text x="610" y="150" font-size="14" font-weight="600" fill="#e7e7ea" text-anchor="middle">done</text>
+  <text x="610" y="168" font-size="11" fill="#9a9aa4" text-anchor="middle">result + git diff</text>
+
+  <line x1="677" y1="154" x2="743" y2="154" stroke="#7ec699" stroke-width="1.5" stroke-dasharray="6 5" marker-end="url(#ag)"/>
+  <text x="710" y="144" font-size="12" fill="#7ec699" text-anchor="middle">webhook</text>
+
+  <rect x="745" y="120" width="191" height="68" rx="10" fill="#141417" stroke="#26262c"/>
+  <text x="840" y="150" font-size="14" font-weight="600" fill="#e7e7ea" text-anchor="middle">your routine</text>
+  <text x="840" y="168" font-size="11" fill="#9a9aa4" text-anchor="middle">wakes the Bot</text>
+
+  <rect x="360" y="232" width="150" height="72" rx="10" fill="#141417" stroke="#26262c"/>
+  <text x="435" y="261" font-size="13" font-weight="600" fill="#e7e7ea" text-anchor="middle">check_job polls</text>
+  <text x="435" y="279" font-size="11" fill="#9a9aa4" text-anchor="middle">~30s &#183; turns &#183; activity</text>
+  <line x1="435" y1="190" x2="435" y2="230" stroke="#6e6e78" stroke-width="1.5" marker-start="url(#a)" marker-end="url(#a)"/>
+
+  <rect x="545" y="232" width="130" height="40" rx="8" fill="#1a1a1e" stroke="#e08a8a"/>
+  <text x="610" y="257" font-size="12" fill="#e08a8a" text-anchor="middle">error / timeout</text>
+  <line x1="610" y1="190" x2="610" y2="230" stroke="#6e6e78" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <path d="M 545 170 H 528 V 344 H 97 V 192" fill="none" stroke="#7ec699" stroke-width="1.5" stroke-dasharray="6 5" marker-end="url(#ag)"/>
+  <text x="315" y="336" font-size="12" fill="#7ec699" text-anchor="middle">follow-up? resume_* keeps the session, skips the cold start</text>
+</svg>
