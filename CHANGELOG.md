@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `resume_codex(session_id, prompt, ...)`, the missing twin of `resume_claude`.
+  Codex follow-ups previously started cold while Claude follow-ups reused the
+  prompt cache; Locum already stored the `thread_id`, it just never sent it
+  back. A resume whose stream reports a different thread id than the one asked
+  for fails loudly instead of reporting a fresh thread as a follow-up.
 - `--version` / `-V`, reading the topmost `## [x.y.z]` heading in CHANGELOG.md.
   Written by a delegated Claude Code job during the demo recording, which is a
   fair test of the tool: the change it described matched the change it made.

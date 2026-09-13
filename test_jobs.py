@@ -195,5 +195,72 @@ j = fresh()
 srv._note_codex_event(j, {"msg": {"type": "agent_message", "session_id": "old-1"}})
 ok("old msg envelope yields session_id", j.session_id == "old-1")
 
+print("\nresume_codex")
+captured = {}
+_spawn_real, _require_real = srv._spawn, srv._require
+srv._spawn = lambda job, argv, *a, **k: captured.update(argv=argv, job=job) or {"job_id": job.id}
+srv._require = lambda binary: f"/usr/bin/{binary}"
+
+asyncio.run(imp(srv.resume_codex)("th-1", "follow up", cwd=ROOT, effort="max"))
+a = captured["argv"]
+e = a.index("exec")
+ok("resume argv shape", a[e:e + 4] == ["exec", "resume", "th-1", "follow up"], " ".join(a))
+ok("resume keeps --json and output file", "--json" in a and "--output-last-message" in a)
+ok("resume passes no --cd (unsupported)", "--cd" not in a)
+ok("resume maps max onto high", 'model_reasoning_effort="high"' in a)
+ok("resume -c precedes exec", a.index("-c") < a.index("exec"))
+ok("resume presets the requested thread", captured["job"].session_id == "th-1")
+ok("resume keeps the bypass flag", "--dangerously-bypass-approvals-and-sandbox" in a)
+
+asyncio.run(imp(srv.resume_codex)("th-1", "p", cwd=ROOT, model="gpt-5"))
+ok("resume passes --model", "--model" in captured["argv"])
+
+srv.AUTONOMY = "ask"
+asyncio.run(imp(srv.resume_codex)("th-1", "p", cwd=ROOT))
+a = captured["argv"]
+ok("ask-mode resume has no --sandbox (unsupported)", "--sandbox" not in a)
+ok("ask-mode resume drops the bypass flag",
+   "--dangerously-bypass-approvals-and-sandbox" not in a)
+asyncio.run(imp(srv.delegate_to_codex)("p", cwd=ROOT))
+ok("ask-mode fresh delegate keeps --sandbox", "--sandbox" in captured["argv"])
+srv.AUTONOMY = "bypass"
+srv._spawn, srv._require = _spawn_real, _require_real
+
+try:
+    asyncio.run(imp(srv.resume_codex)("th-1", "p", cwd=ROOT, effort="turbo"))
+    ok("resume rejects a bad effort", False)
+except ValueError:
+    ok("resume rejects a bad effort", True)
+
+print("\nresume thread mismatch")
+import tempfile
+def roundtrip(expect, reported):
+    j = srv.Job(id="rx", kind="codex", prompt="p", cwd=ROOT)
+    j.session_id = reported      # what the event stream carried back
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+        f.write("last message")
+        out = pathlib.Path(f.name)
+    srv._finalize_codex_output(j, out, expect_thread=expect)
+    leftover = out.exists()
+    if leftover:
+        out.unlink()
+    return j, leftover
+
+j, leftover = roundtrip("th-1", "th-1")
+ok("matching thread finishes", j.status == "done" and j.result == "last message")
+ok("matching thread cleans up", not leftover)
+j, _ = roundtrip("th-1", "th-OTHER")
+ok("fresh thread fails loudly",
+   j.status == "error" and "th-OTHER" in (j.error or "") and "th-1" in (j.error or ""),
+   (j.error or "")[:80])
+j = srv.Job(id="dx", kind="codex", prompt="p", cwd=ROOT)
+j.session_id = "whatever"
+with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+    f.write("fresh run")
+    out = pathlib.Path(f.name)
+srv._finalize_codex_output(j, out)
+out.unlink(missing_ok=True)
+ok("fresh delegate ignores thread check", j.status == "done" and j.result == "fresh run")
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)
