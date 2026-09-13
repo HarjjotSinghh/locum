@@ -746,5 +746,107 @@ try:
 finally:
     srv.SUBSCRIBERS.discard(q)
 
+print("\ndoctor")
+_docbin = tempfile.mkdtemp(prefix="locum-doctor-test-")
+pathlib.Path(_docbin, "claude").write_text('#!/bin/sh\necho "2.9.9 (Fake Claude Code)"\n')
+pathlib.Path(_docbin, "codex").write_text('#!/bin/sh\necho "codex-cli 9.9.9"\n')
+os.chmod(pathlib.Path(_docbin) / "claude", 0o755)
+os.chmod(pathlib.Path(_docbin) / "codex", 0o755)
+
+
+def _in_env(fn, **kw):
+    """Run fn with LOCUM_* cleared and kw applied. Restores everything."""
+    saved = dict(os.environ)
+    try:
+        for k in [k for k in os.environ if k.startswith("LOCUM_")]:
+            del os.environ[k]
+        os.environ.update(kw)
+        return fn()
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def _doclevels(**kw):
+    return {n: (d, lv) for n, d, lv in _in_env(srv._doctor_checks, **kw)}
+
+
+_full_path = _docbin + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")
+_healthy = {"LOCUM_TOKEN": "x" * 10, "LOCUM_ROOTS": ROOT, "PATH": _full_path}
+lv = _doclevels(**_healthy)
+ok("healthy setup has no failures", all(lv != "fail" for _, lv in lv.values()))
+ok("doctor reports cli versions",
+   "9.9.9" in lv["codex"][0] and "2.9.9" in lv["claude"][0])
+ok("no verdict line when a cli exists", "agents" not in lv)
+ok("token length, never the token", lv["token"] == ("set (10 chars)", "ok"))
+ok("healthy exits 0", _in_env(srv._run_doctor, **_healthy) == 0)
+ok("broken exits 1", _in_env(srv._run_doctor) == 1)
+
+lv = _doclevels(PATH=_full_path)
+ok("missing token fails", lv["token"][1] == "fail")
+lv = _doclevels(LOCUM_TOKEN="x", LOCUM_ROOTS="/definitely/not/here")
+ok("missing roots fail",
+   lv["roots"][1] == "fail" and "not/here" in lv["roots"][0])
+lv = _doclevels(LOCUM_TOKEN="x", LOCUM_ROOTS=":::")
+ok("empty roots fail", lv["roots"][1] == "fail")
+
+_emptybin = tempfile.mkdtemp(prefix="locum-empty-test-")
+lv = _doclevels(LOCUM_TOKEN="x", LOCUM_ROOTS=ROOT, PATH=_emptybin)
+ok("missing clis warn each",
+   lv["claude"][1] == "warn" and lv["codex"][1] == "warn")
+ok("no agent at all fails", lv["agents"][1] == "fail")
+
+lv = _doclevels(**_healthy, LOCUM_PORT="abc", LOCUM_AUTONOMY="maybe",
+                 LOCUM_MAX_CONCURRENT="0", LOCUM_MAX_JOBS="lots")
+ok("bad port fails", lv["port"][1] == "fail")
+ok("bad autonomy fails", lv["autonomy"][1] == "fail")
+ok("zero concurrency fails", lv["concurrency"][1] == "fail")
+ok("bad max_jobs fails", lv["max_jobs"][1] == "fail")
+ok("valid knobs stay silent", "max_events" not in _doclevels(**_healthy))
+
+import socket as _sock
+_s = _sock.socket()
+_s.bind(("127.0.0.1", 0))
+try:
+    lv = _doclevels(**_healthy, LOCUM_PORT=str(_s.getsockname()[1]))
+    ok("used port reported, not failed",
+       lv["port"][1] == "ok" and "in use" in lv["port"][0])
+finally:
+    _s.close()
+
+lv = _doclevels(**_healthy, LOCUM_COMPLETION_WEBHOOK="not a url")
+ok("bad webhook fails", lv["webhook"][1] == "fail")
+lv = _doclevels(**_healthy,
+                 LOCUM_COMPLETION_WEBHOOK="https://hooks.example.com/x?token=secret")
+ok("webhook shows host only",
+   lv["webhook"] == ("set (https://hooks.example.com)", "ok"))
+
+_jd = tempfile.mkdtemp(prefix="locum-doctor-journal-")
+lv = _doclevels(**_healthy,
+                 LOCUM_JOBS_FILE=str(pathlib.Path(_jd) / "sub" / "jobs.jsonl"))
+ok("missing journal is fine when creatable", lv["journal"][1] == "ok")
+_jf = pathlib.Path(_jd) / "jobs.jsonl"
+_jf.write_text('{"job_id": "a"}\nnot json\n{"job_id": "a"}\n{"job_id": "b"}\n')
+lv = _doclevels(**_healthy, LOCUM_JOBS_FILE=str(_jf))
+ok("journal counts distinct jobs", lv["journal"][0].endswith("(2 jobs)"),
+   lv["journal"][0])
+
+
+def _doctor_cli(**kw):
+    env = dict(os.environ)
+    for k in [k for k in env if k.startswith("LOCUM_")]:
+        del env[k]
+    env.update(kw)
+    p = subprocess.run([sys.executable, "server.py", "--doctor"],
+                       cwd=str(pathlib.Path(__file__).parent),
+                       env=env, capture_output=True, text=True, timeout=120)
+    return p.returncode, p.stdout
+
+
+rc, out = _doctor_cli(LOCUM_TOKEN="x", LOCUM_ROOTS=ROOT)
+ok("cli healthy exits 0", rc == 0 and "locum doctor" in out, f"rc={rc}")
+rc, out = _doctor_cli(LOCUM_ROOTS=ROOT)
+ok("cli missing token exits 1", rc == 1 and "FAIL" in out, f"rc={rc}")
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

@@ -164,6 +164,8 @@ Neither needs `claude` installed.
 
 ## Troubleshooting
 
+Start here: `uv run server.py --doctor` checks the common stuff (token, roots, CLIs, port, journal) and exits nonzero with FAIL lines.
+
 **Everything 404s, even `/health`.** Port collision — something else owns the port. (The Grok Bot desktop app squats on `[::1]:8787`, which is why the default is 8791.) Check:
 
 ```bash
