@@ -79,7 +79,7 @@ can tell the operator what a given answer cost them.
 
 ## Rules
 
-- Never re-delegate a job that is still `running`. Poll it.
+- Never re-delegate a job that is still `queued` or `running`. Poll it.
 - Never poll faster than every 20s.
 - On `status: error` or `timeout`, read `stderr_tail` before retrying, and change
   the prompt rather than repeating it verbatim.

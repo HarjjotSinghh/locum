@@ -161,7 +161,7 @@ being done yourself.
 
 delegate_to_claude returns a job_id immediately. Poll check_job about every 30s
 and report recent_activity so progress is visible. Never re-delegate a job that
-is still running. For follow-ups on the same work use resume_claude with the
+is still queued or running. For follow-ups on the same work use resume_claude with the
 session_id, never a fresh delegation (resume_codex for Codex jobs).
 
 cwd must be an absolute path inside an allowed root.
@@ -201,7 +201,7 @@ Covers the job registry: ordering, status filtering, limits, truncation, and the
 | `resume_claude(session_id, prompt, cwd?, model?, effort?)` | Continue a session. Reuses the prompt cache -- always prefer for follow-ups. |
 | `delegate_to_codex(prompt, cwd, model?, effort?)` | Same contract, via Codex CLI. |
 | `resume_codex(session_id, prompt, cwd?, model?, effort?)` | Continue a Codex session. Fails loudly if Codex reports back a different thread. |
-| `check_job(job_id)` | Poll. Returns status, turn count, recent tool activity, result. |
+| `check_job(job_id)` | Poll. Returns status, queue position while queued, turn count, recent tool activity, result. |
 | `list_jobs(limit?, status?)` | Recent jobs, newest first. Confirms work really ran, recovers a lost `job_id`, finds a `session_id` to resume. |
 | `cancel_job(job_id)` | Kill a runaway job. |
 

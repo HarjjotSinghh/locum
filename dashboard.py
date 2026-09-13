@@ -53,6 +53,7 @@ PAGE = """<!doctype html>
   .job[aria-selected=true] { background:var(--panel-2); box-shadow:inset 2px 0 0 var(--fg) }
   .dot { width:7px; height:7px; border-radius:50%; background:var(--fg-3) }
   .dot.done { background:var(--ok) } .dot.running { background:var(--run) }
+  .dot.queued { background:transparent; border:1px solid var(--run) }
   .dot.error, .dot.timeout, .dot.cancelled { background:var(--bad) }
   .job .p { grid-column:2; color:var(--fg); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
   .job .m { grid-column:2/4; color:var(--fg-3); font:11px/1.4 var(--mono) }

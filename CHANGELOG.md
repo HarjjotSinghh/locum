@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A `queued` job status, distinct from `running`. `LOCUM_MAX_CONCURRENT` is a
+  semaphore taken after the job already reported `"running"`, so a third job
+  looked live in `check_job` and the dashboard while it was sitting in a lock.
+  New jobs now report `queued` with their position in line until a slot frees,
+  `cancel_job` reaches queued jobs, and pruning never drops them.
 - `resume_codex(session_id, prompt, ...)`, the missing twin of `resume_claude`.
   Codex follow-ups previously started cold while Claude follow-ups reused the
   prompt cache; Locum already stored the `thread_id`, it just never sent it
