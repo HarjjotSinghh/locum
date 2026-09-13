@@ -1,11 +1,16 @@
 """Exercise list_jobs against a throwaway server: shape, ordering, filtering,
 limits, truncation, and the prune cap. No `claude` needed -- jobs are injected
 directly into the registry."""
-import asyncio, importlib.util, os, pathlib, sys, time
+import asyncio, importlib.util, os, pathlib, sys, tempfile, time
 
 os.environ.setdefault("LOCUM_TOKEN", "t")
 os.environ.setdefault("LOCUM_ROOTS", "/tmp")
 os.environ.setdefault("LOCUM_MAX_JOBS", "5")
+# Importing the server restores the journal, so point it at a fresh temp path
+# first: the operator's real history must neither leak into the suite nor be
+# rewritten by it.
+os.environ.setdefault("LOCUM_JOBS_FILE",
+                      str(pathlib.Path(tempfile.mkdtemp(prefix="locum-test-")) / "jobs.jsonl"))
 
 spec = importlib.util.spec_from_file_location(
     "srv", str(pathlib.Path(__file__).parent / "server.py"))
@@ -347,6 +352,124 @@ started, res, end = asyncio.run(cancel_queued_scenario())
 ok("cancel accepts a queued job", res["status"] == "cancelling")
 ok("queued cancel lands", end[1] == "cancelled", f"got {end}")
 ok("running cancel still lands", end[0] == "cancelled", f"got {end}")
+
+print("\njob persistence")
+import json
+_journal_dir = tempfile.mkdtemp(prefix="locum-persist-test-")
+_saved_jobs_file, _saved_jobs = srv.JOBS_FILE, dict(srv.JOBS)
+srv.JOBS_FILE = pathlib.Path(_journal_dir) / "jobs.jsonl"
+try:
+    async def persist_scenario():
+        srv.SEM = asyncio.Semaphore(4)
+        srv.NARRATE = False
+        srv.JOBS.clear()
+        try:
+            j = srv.Job(id="p1", kind="codex", prompt="persist me", cwd=ROOT)
+            srv._spawn(j, [sys.executable, "-c", "pass"], lambda j, e: None)
+            await j._task
+            return j.status
+        finally:
+            srv.SEM = asyncio.Semaphore(srv.MAX_CONCURRENT)
+            srv.NARRATE = True
+
+    ok("spawned job completes", asyncio.run(persist_scenario()) == "done")
+    seen = [json.loads(line)["status"] for line in srv.JOBS_FILE.read_text().splitlines()]
+    ok("spawn journals every transition", seen == ["queued", "running", "done"], str(seen))
+
+    srv.JOBS.clear()
+    j = srv.Job(id="ps", kind="claude", prompt="p", cwd=ROOT)
+    j.status = "running"
+    srv.JOBS["ps"] = j
+    srv._note_claude_event(j, {"type": "system", "subtype": "init",
+                               "session_id": "sess-9"})
+    last = json.loads(srv.JOBS_FILE.read_text().splitlines()[-1])
+    ok("claude init journals the session",
+       last["job_id"] == "ps" and last["session_id"] == "sess-9")
+    n0 = len(srv.JOBS_FILE.read_text().splitlines())
+    srv._note_claude_event(j, {"type": "system", "subtype": "init",
+                               "session_id": "sess-9"})
+    ok("repeat sighting writes nothing",
+       len(srv.JOBS_FILE.read_text().splitlines()) == n0)
+    jx = srv.Job(id="px", kind="codex", prompt="p", cwd=ROOT)
+    jx.status = "running"
+    srv.JOBS["px"] = jx
+    srv._note_codex_event(jx, {"type": "thread.started", "thread_id": "th-9"})
+    last = json.loads(srv.JOBS_FILE.read_text().splitlines()[-1])
+    ok("codex thread journals the session", last["session_id"] == "th-9")
+
+    srv.JOBS.clear()
+    srv.JOBS_FILE.unlink()
+    d = srv.Job(id="rd", kind="claude", prompt="did work", cwd=ROOT)
+    d.status, d.finished = "done", time.time()
+    d.result, d.session_id, d.cost_usd = "r" * 5000, "sess-rd", 0.1234
+    d.model, d.effort, d.turns = "opus", "high", 7
+    d.tokens = {"input_tokens": 100}
+    srv._persist_job(d)
+    e = srv.Job(id="re", kind="codex", prompt="broke", cwd=ROOT)
+    e.status, e.finished, e.error = "error", time.time(), "boom"
+    srv._persist_job(e)
+    r = srv.Job(id="rr", kind="claude", prompt="mid-flight", cwd=ROOT)
+    r.status, r.session_id = "running", "sess-rr"
+    srv._persist_job(r)
+    q = srv.Job(id="rq", kind="codex", prompt="waiting", cwd=ROOT)
+    q.session_id = "th-rq"
+    srv._persist_job(q)
+    w = srv.Job(id="rw", kind="claude", prompt="twice", cwd=ROOT)
+    w.status = "running"
+    srv._persist_job(w)
+    w.status, w.result, w.finished = "done", "second write wins", time.time()
+    srv._persist_job(w)
+    with open(srv.JOBS_FILE, "a", encoding="utf-8") as f:
+        f.write("not json\n[1,2]\n{\"no_id\": true}\n")
+    srv.JOBS.clear()
+    srv._load_jobs()
+    ok("done job restored",
+       srv.JOBS["rd"].status == "done" and srv.JOBS["rd"].cost_usd == 0.1234)
+    ok("result bounded", len(srv.JOBS["rd"].result or "") <= 2000)
+    ok("tuning restored",
+       srv.JOBS["rd"].model == "opus" and srv.JOBS["rd"].effort == "high")
+    ok("turns and tokens restored",
+       srv.JOBS["rd"].turns == 7 and srv.JOBS["rd"].tokens == {"input_tokens": 100})
+    ok("error job restored",
+       srv.JOBS["re"].status == "error" and srv.JOBS["re"].error == "boom")
+    ok("running job becomes a loud error",
+       srv.JOBS["rr"].status == "error" and "did not survive" in (srv.JOBS["rr"].error or ""))
+    ok("interrupted session kept for resume", srv.JOBS["rr"].session_id == "sess-rr")
+    ok("queued job marked too",
+       srv.JOBS["rq"].status == "error" and "queued" in (srv.JOBS["rq"].error or ""))
+    ok("last write wins",
+       srv.JOBS["rw"].status == "done" and srv.JOBS["rw"].result == "second write wins")
+    ok("garbage lines skipped", len(srv.JOBS) == 5, f"{len(srv.JOBS)} jobs")
+    order = [j["job_id"] for j in call(limit=50)["jobs"]]
+    ok("restored order newest-first",
+       order == sorted(order, key=lambda i: srv.JOBS[i].started, reverse=True), str(order))
+
+    srv.JOBS.clear()
+    srv.JOBS_FILE = pathlib.Path(_journal_dir) / "absent.jsonl"
+    srv._load_jobs()
+    ok("missing journal loads empty", srv.JOBS == {})
+    srv.JOBS_FILE = pathlib.Path(_journal_dir) / "jobs.jsonl"
+
+    mode = oct(srv.JOBS_FILE.stat().st_mode & 0o777)
+    ok("journal is owner-only", mode == "0o600", mode)
+
+    srv._load_jobs()
+    for i in range(3):
+        x = srv.Job(id=f"ex{i}", kind="claude", prompt="extra", cwd=ROOT)
+        x.status, x.finished = "done", time.time()
+        srv.JOBS[x.id] = x
+        srv._persist_job(x)
+    srv._prune_jobs()
+    survivors = set(srv.JOBS)
+    file_ids = [json.loads(line)["job_id"]
+                for line in srv.JOBS_FILE.read_text().splitlines()]
+    ok("prune bounds memory", len(srv.JOBS) <= 5, f"{len(srv.JOBS)} jobs")
+    ok("prune compacts the journal", sorted(file_ids) == sorted(survivors),
+       f"{len(file_ids)} lines")
+finally:
+    srv.JOBS.clear()
+    srv.JOBS.update(_saved_jobs)
+    srv.JOBS_FILE = _saved_jobs_file
 
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

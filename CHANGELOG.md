@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Job metadata persistence. Every spawn, session sighting, and finish appends
+  one JSON line to `~/.locum/jobs.jsonl` (`LOCUM_JOBS_FILE`), and a restart
+  restores history with session ids intact, so `resume_*` outlives launchd
+  recycling the process. Jobs that were mid-flight come back as explicit
+  errors rather than vanishing. Results are clipped to 2000 chars and
+  transcripts stay in memory only, the file is owner-only, and pruning
+  compacts it back to one line per live job.
 - A `queued` job status, distinct from `running`. `LOCUM_MAX_CONCURRENT` is a
   semaphore taken after the job already reported `"running"`, so a third job
   looked live in `check_job` and the dashboard while it was sitting in a lock.

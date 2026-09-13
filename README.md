@@ -244,6 +244,10 @@ This is also the answer to "how do I show that it is really running on my
 machine": the MCP client shows a chat, the dashboard shows the actual tool calls
 and token spend behind it.
 
+Job metadata is journalled to `~/.locum/jobs.jsonl`, so the history above and
+every `session_id` survive a restart; transcripts do not, and jobs that were
+mid-flight come back as errors saying so.
+
 ## Watching it work
 
 The server narrates delegated jobs on stdout, so a terminal beside your MCP
