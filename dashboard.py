@@ -230,9 +230,15 @@ async function openDetail() {
     try {
       const cr = await fetch(`/api/jobs/${j.job_id}/cancel`,
         { method: "POST", credentials: "same-origin" });
-      say(cr.ok ? "cancelling…" : `cancel failed: ${cr.status}`, !cr.ok);
+      // A job that finished since this pane opened answers 200 with a note
+      // instead of "cancelling": report that, not a cancellation that
+      // never happened.
+      const result = await cr.json().catch(() => ({}));
+      const cancelling = cr.ok && result.status === "cancelling";
+      const doneMsg = result.note || `cancel failed: ${cr.status}`;
+      say(cancelling ? "cancelling…" : doneMsg, !cancelling);
       // The live feed re-renders this pane when the job's status lands.
-      if (cr.ok) setTimeout(openDetail, 800);
+      if (cancelling) setTimeout(openDetail, 800);
     } catch { say("cancel failed: network error", true); }
     kb.disabled = false;
   };
