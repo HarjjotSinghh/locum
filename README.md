@@ -159,6 +159,9 @@ Any task touching a real repository (multi-file edits, refactors, debugging,
 running tests, reading a codebase) must go to delegate_to_claude rather than
 being done yourself.
 
+Call status first: it shows the allowed roots, which CLIs are present, and
+whether a slot is free.
+
 delegate_to_claude returns a job_id immediately. Poll check_job about every 30s
 and report recent_activity so progress is visible. Never re-delegate a job that
 is still queued or running. For follow-ups on the same work use resume_claude with the
@@ -201,9 +204,10 @@ Covers the job registry: ordering, status filtering, limits, truncation, and the
 | `resume_claude(session_id, prompt, cwd?, model?, effort?)` | Continue a session. Reuses the prompt cache -- always prefer for follow-ups. |
 | `delegate_to_codex(prompt, cwd, model?, effort?)` | Same contract, via Codex CLI. |
 | `resume_codex(session_id, prompt, cwd?, model?, effort?)` | Continue a Codex session. Fails loudly if Codex reports back a different thread. |
-| `check_job(job_id)` | Poll. Returns status, queue position while queued, turn count, recent tool activity, result. |
+| `check_job(job_id)` | Poll. Returns status, queue position while queued, turn count, recent tool activity, result — plus `git_changes` when `cwd` is a repo. |
 | `list_jobs(limit?, status?)` | Recent jobs, newest first. Confirms work really ran, recovers a lost `job_id`, finds a `session_id` to resume. |
 | `cancel_job(job_id)` | Kill a runaway job. |
+| `status()` | Roots, which CLIs are on PATH, running/queued counts, free slots. Call before delegating. |
 
 Everything is async. MCP tool calls time out long before a real coding task
 finishes, so `delegate_*` returns a handle and the Bot polls. This is the single

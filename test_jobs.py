@@ -579,5 +579,81 @@ finally:
     _hookd.shutdown()
     _hookd.server_close()
 
+print("\nstatus tool")
+import shutil
+import subprocess
+srv.JOBS.clear()
+mk("st-r", "running")
+mk("st-q", "queued")
+mk("st-d", "done", result="x")
+s = asyncio.run(imp(srv.status)())
+ok("status roots", s["roots"] == [str(r) for r in srv.ROOTS])
+ok("status binaries keyed", set(s["binaries"]) == {"claude", "codex"})
+ok("status binaries are paths or null",
+   all(v is None or (isinstance(v, str) and os.path.isabs(v))
+       for v in s["binaries"].values()),
+   str(s["binaries"]))
+ok("status counts", s["running"] == 1 and s["queued"] == 1)
+ok("status free slots",
+   s["free_slots"] == srv.MAX_CONCURRENT - 1
+   and s["max_concurrent"] == srv.MAX_CONCURRENT)
+names = [t.name for t in asyncio.run(srv.mcp.list_tools())]
+ok("status registered", "status" in names)
+
+print("\ngit changes on completion")
+plain = tempfile.mkdtemp(prefix="locum-plain-test-")
+ok("non-repo yields nothing", srv._git_changes(plain) is None)
+has_git = bool(shutil.which("git"))
+if not has_git:
+    ok("git absent: annotation cleanly disabled", srv._git_changes(plain) is None)
+else:
+    repo = tempfile.mkdtemp(prefix="locum-git-test-")
+    subprocess.run(["git", "init", "-q", repo], check=True, capture_output=True)
+    (pathlib.Path(repo) / "a.txt").write_text("one\n")
+    ch = srv._git_changes(repo)
+    ok("untracked file shows in status",
+       ch is not None and "a.txt" in ch["status_short"], str(ch))
+    ok("nothing tracked means empty diff", ch["diff_stat"] == "")
+    subprocess.run(["git", "-C", repo, "add", "a.txt"], check=True)
+    subprocess.run(["git", "-C", repo, "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "init"], check=True)
+    ch = srv._git_changes(repo)
+    ok("clean repo yields empty strings",
+       ch == {"status_short": "", "diff_stat": ""}, str(ch))
+    (pathlib.Path(repo) / "a.txt").write_text("one\ntwo\n")
+    ch = srv._git_changes(repo)
+    ok("modification shows in diff",
+       "a.txt" in ch["diff_stat"] and "1 insertion" in ch["diff_stat"],
+       ch["diff_stat"])
+
+    async def git_scenario():
+        srv.SEM = asyncio.Semaphore(4)
+        srv.NARRATE = False
+        srv.JOBS.clear()
+        try:
+            work = tempfile.mkdtemp(prefix="locum-work-test-")
+            subprocess.run(["git", "init", "-q", work], check=True,
+                           capture_output=True)
+            j = srv.Job(id="g1", kind="claude", prompt="p", cwd=work)
+            srv._spawn(j, [sys.executable, "-c",
+                           "import pathlib; pathlib.Path('made.txt').write_text('hi')"],
+                       lambda j, e: None)
+            await j._task
+            return j.status, await imp(srv.check_job)("g1")
+        finally:
+            srv.SEM = asyncio.Semaphore(srv.MAX_CONCURRENT)
+            srv.NARRATE = True
+
+    st, snap = asyncio.run(git_scenario())
+    ok("job in repo completes", st == "done")
+    ok("check_job carries what landed",
+       "made.txt" in (snap.get("git_changes") or {}).get("status_short", ""),
+       str(snap.get("git_changes")))
+    srv._persist_job(srv.JOBS["g1"])
+    srv.JOBS.clear()
+    srv._load_jobs()
+    ok("git annotation survives a restart",
+       "made.txt" in ((srv.JOBS["g1"].git_changes or {}).get("status_short", "")))
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)
