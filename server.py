@@ -121,6 +121,8 @@ def _doctor_checks() -> list[tuple[str, str, str]]:
     port_raw = os.environ.get("LOCUM_PORT", "8791")
     try:
         port = int(port_raw)
+        if not 1 <= port <= 65535:
+            raise ValueError("out of range")
         s = socket.socket()
         try:
             s.bind(("127.0.0.1", port))
@@ -134,7 +136,8 @@ def _doctor_checks() -> list[tuple[str, str, str]]:
         finally:
             s.close()
     except ValueError:
-        add(("port", f"LOCUM_PORT={port_raw!r} is not a number", "fail"))
+        add(("port", f"LOCUM_PORT={port_raw!r} is not a usable port (want 1-65535)",
+             "fail"))
 
     jf = Path(os.environ.get("LOCUM_JOBS_FILE",
                              str(Path.home() / ".locum" / "jobs.jsonl"))).expanduser()
@@ -143,7 +146,12 @@ def _doctor_checks() -> list[tuple[str, str, str]]:
             lines = jf.read_text(encoding="utf-8").splitlines()
         except OSError as exc:
             add(("journal", f"{jf} unreadable: {exc}", "fail"))
-        else:
+            lines = None
+        if lines is not None and not os.access(jf, os.W_OK):
+            add(("journal", f"{jf} is not writable: history would be silently lost",
+                 "fail"))
+            lines = None
+        if lines is not None:
             ids = set()
             for line in lines:
                 try:
@@ -169,6 +177,7 @@ def _doctor_checks() -> list[tuple[str, str, str]]:
         try:
             parts = urlparse(hook)
             host = parts.hostname
+            parts.port  # raises ValueError on a malformed explicit port
         except ValueError:
             parts, host = None, None
         if parts is not None and parts.scheme in {"http", "https"} and host:
@@ -198,8 +207,16 @@ def _doctor_checks() -> list[tuple[str, str, str]]:
             else:
                 add(("concurrency", str(iv), "ok"))
         elif var == "LOCUM_JOB_TIMEOUT":
-            add(("timeout", f"{iv}s", "ok"))
-        # max_jobs/max_events: silent when valid.
+            if iv <= 0:
+                add(("timeout", f"{iv} (every job would time out at once)", "fail"))
+            else:
+                add(("timeout", f"{iv}s", "ok"))
+        elif var == "LOCUM_MAX_EVENTS":
+            if iv < 0:
+                add(("max_events", f"{iv} (negative breaks the transcript deque)",
+                     "fail"))
+            # Silent when valid.
+        # max_jobs: silent when valid.
 
     if sys.platform == "darwin":
         plist = Path.home() / "Library/LaunchAgents/co.harjot.locum.plist"

@@ -803,6 +803,18 @@ ok("bad autonomy fails", lv["autonomy"][1] == "fail")
 ok("zero concurrency fails", lv["concurrency"][1] == "fail")
 ok("bad max_jobs fails", lv["max_jobs"][1] == "fail")
 ok("valid knobs stay silent", "max_events" not in _doclevels(**_healthy))
+lv = _doclevels(**_healthy, LOCUM_PORT="65536")
+ok("huge port fails without traceback", lv["port"][1] == "fail")
+lv = _doclevels(**_healthy, LOCUM_PORT="0")
+ok("zero port fails", lv["port"][1] == "fail")
+lv = _doclevels(**_healthy, LOCUM_JOB_TIMEOUT="0", LOCUM_MAX_EVENTS="-1")
+ok("zero timeout fails", lv["timeout"][1] == "fail")
+ok("negative max_events fails", lv["max_events"][1] == "fail")
+lv = _doclevels(**_healthy, LOCUM_MAX_EVENTS="0")
+ok("zero max_events stays silent", "max_events" not in lv)
+lv = _doclevels(**_healthy,
+                 LOCUM_COMPLETION_WEBHOOK="https://hooks.example.com:bad/x")
+ok("bad webhook port fails", lv["webhook"][1] == "fail")
 
 import socket as _sock
 _s = _sock.socket()
@@ -830,6 +842,14 @@ _jf.write_text('{"job_id": "a"}\nnot json\n{"job_id": "a"}\n{"job_id": "b"}\n')
 lv = _doclevels(**_healthy, LOCUM_JOBS_FILE=str(_jf))
 ok("journal counts distinct jobs", lv["journal"][0].endswith("(2 jobs)"),
    lv["journal"][0])
+_ro = pathlib.Path(_jd) / "readonly.jsonl"
+_ro.write_text('{"job_id": "a"}\n')
+_ro.chmod(0o444)
+if os.geteuid() == 0:
+    ok("read-only journal fails", True, "skipped as root")
+else:
+    lv = _doclevels(**_healthy, LOCUM_JOBS_FILE=str(_ro))
+    ok("read-only journal fails", lv["journal"][1] == "fail")
 
 
 def _doctor_cli(**kw):
