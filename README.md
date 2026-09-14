@@ -135,7 +135,7 @@ Everything is async — a coding task takes far longer than an MCP call can wait
 | `check_job(job_id)` | Poll. Returns status, queue position, turns, activity, result — plus `git_changes` when `cwd` is a repo. |
 | `list_jobs(limit?, status?)` | Recent jobs, newest first. Confirms work really ran, recovers a lost `job_id`, finds a `session_id` to resume. |
 | `cancel_job(job_id)` | Kill a runaway job. |
-| `status()` | Roots, which CLIs are on PATH, running/queued counts, free slots. Call before delegating. |
+| `status()` | Roots, CLIs on PATH, running/queued counts, free slots, budget use. Call before delegating. |
 
 `effort` is one vocabulary across both CLIs (`low` / `medium` / `high` / `max`; Codex maps `max` onto `high`). `model` passes straight through. Both cost real quota, so raise them on purpose, not by habit.
 
@@ -152,6 +152,8 @@ The server also narrates jobs on stdout. Under launchd: `tail -f ~/Library/Logs/
 Delegated jobs run autonomously (`LOCUM_AUTONOMY=bypass`): nobody is at the keyboard, so an approval prompt wouldn't pause the job, it would hang it until timeout. That means the agent can run anything as you — `LOCUM_ROOTS` only controls where the job *starts*.
 
 What protects you, in order: your `LOCUM_TOKEN`, narrow `LOCUM_ROOTS`, and running this only for yourself. `LOCUM_AUTONOMY=ask` restores prompting, but Grok Bot can't answer prompts, so jobs will hang.
+
+None of that limits spend, so there are caps: `LOCUM_MAX_COST_USD` and `LOCUM_MAX_JOBS_PER_DAY`, each measured over the trailing 24h and each disabled when unset. Tripping one refuses new delegations with a clear error, and `status` shows use so far. Cost only counts reported spend (Codex reports none), so set the job cap too if Codex matters to you.
 
 ## Tests
 

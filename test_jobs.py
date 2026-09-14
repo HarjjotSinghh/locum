@@ -873,5 +873,106 @@ ok("cli healthy exits 0", rc == 0 and "locum doctor" in out, f"rc={rc}")
 rc, out = _doctor_cli(LOCUM_ROOTS=ROOT)
 ok("cli missing token exits 1", rc == 1 and "FAIL" in out, f"rc={rc}")
 
+print("\nspend cap")
+_saved_cost, _saved_jobs = srv.MAX_COST_USD, srv.MAX_JOBS_PER_DAY
+try:
+    srv.JOBS.clear()
+    a = mk("s1", "done", result="x")
+    a.cost_usd = 6.0
+    b = mk("s2", "done", result="x")
+    b.cost_usd = 5.0
+    old = srv.Job(id="sold", kind="claude", prompt="p", cwd=ROOT)
+    old.status, old.finished, old.cost_usd = "done", time.time(), 100.0
+    old.started = time.time() - 90000
+    srv.JOBS["sold"] = old
+    spent, started = srv._usage_24h()
+    ok("usage sums the window", spent == 11.0 and started == 2,
+       f"{spent} {started}")
+
+    weird = mk("s3", "done", result="x")
+    weird.cost_usd = "bogus"
+    spent, started = srv._usage_24h()
+    ok("non-numeric cost ignored", spent == 11.0 and started == 3,
+       f"{spent} {started}")
+    del srv.JOBS["s3"]
+
+    srv.MAX_COST_USD, srv.MAX_JOBS_PER_DAY = 10.0, 0
+    try:
+        srv._check_caps()
+        ok("cost cap refuses", False)
+    except ValueError as e:
+        ok("cost cap refuses", "10.00" in str(e) and "24h" in str(e),
+           str(e)[:80])
+    srv.MAX_COST_USD, srv.MAX_JOBS_PER_DAY = 0, 2
+    try:
+        srv._check_caps()
+        ok("job cap refuses", False)
+    except ValueError as e:
+        ok("job cap refuses", "2 of 2" in str(e), str(e)[:80])
+    srv.MAX_COST_USD, srv.MAX_JOBS_PER_DAY = 0, 3
+    srv._check_caps()
+    ok("headroom passes", True)
+    srv.MAX_COST_USD, srv.MAX_JOBS_PER_DAY = 0, 0
+    srv._check_caps()
+    ok("unset disables", True)
+
+    _require_real = srv._require
+    srv._require = lambda binary: f"/usr/bin/{binary}"
+    try:
+        srv.MAX_JOBS_PER_DAY = 2
+        try:
+            asyncio.run(imp(srv.delegate_to_claude)("p", cwd=ROOT))
+            ok("delegate_to_claude honors the cap", False)
+        except ValueError as e:
+            ok("delegate_to_claude honors the cap", "job cap" in str(e))
+        try:
+            asyncio.run(imp(srv.resume_claude)("sess-1", "p", cwd=ROOT))
+            ok("resume_claude honors the cap", False)
+        except ValueError:
+            ok("resume_claude honors the cap", True)
+        try:
+            asyncio.run(imp(srv.delegate_to_codex)("p", cwd=ROOT))
+            ok("delegate_to_codex honors the cap", False)
+        except ValueError:
+            ok("delegate_to_codex honors the cap", True)
+        try:
+            asyncio.run(imp(srv.resume_codex)("th-1", "p", cwd=ROOT))
+            ok("resume_codex honors the cap", False)
+        except ValueError:
+            ok("resume_codex honors the cap", True)
+    finally:
+        srv._require = _require_real
+    ok("refusals spawn nothing", len(srv.JOBS) == 3 and "s1" in srv.JOBS)
+
+    srv.MAX_COST_USD, srv.MAX_JOBS_PER_DAY = 10.0, 5
+    s = asyncio.run(imp(srv.status)())
+    ok("status reports budget",
+       s["budget"] == {"max_cost_usd": 10.0, "spent_24h": 11.0,
+                       "max_jobs_per_day": 5, "started_24h": 2},
+       str(s["budget"]))
+    srv.MAX_COST_USD, srv.MAX_JOBS_PER_DAY = 0, 0
+    s = asyncio.run(imp(srv.status)())
+    ok("unset caps read null",
+       s["budget"]["max_cost_usd"] is None
+       and s["budget"]["max_jobs_per_day"] is None)
+
+    srv.JOBS.clear()
+    srv.MAX_COST_USD = -1
+    try:
+        srv._check_caps()
+        ok("negative cap fails closed", False)
+    except ValueError:
+        ok("negative cap fails closed", True)
+
+    lv = _doclevels(**_healthy, LOCUM_MAX_COST_USD="-5")
+    ok("negative spend cap fails doctor", lv["spend_cap"][1] == "fail")
+    lv = _doclevels(**_healthy, LOCUM_MAX_JOBS_PER_DAY="2.5")
+    ok("fractional job cap fails doctor", lv["job_cap"][1] == "fail")
+    lv = _doclevels(**_healthy, LOCUM_MAX_COST_USD="25",
+                     LOCUM_MAX_JOBS_PER_DAY="50")
+    ok("valid caps stay silent", "spend_cap" not in lv and "job_cap" not in lv)
+finally:
+    srv.MAX_COST_USD, srv.MAX_JOBS_PER_DAY = _saved_cost, _saved_jobs
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)
