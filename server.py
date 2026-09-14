@@ -191,6 +191,29 @@ def _doctor_checks() -> list[tuple[str, str, str]]:
     else:
         add(("autonomy", f"{autonomy!r} (want bypass or ask)", "fail"))
 
+    cost_raw = os.environ.get("LOCUM_MAX_COST_USD", "")
+    if cost_raw.strip():
+        try:
+            cost_cap = float(cost_raw)
+        except ValueError:
+            add(("spend_cap", f"LOCUM_MAX_COST_USD={cost_raw!r} is not a number",
+                 "fail"))
+        else:
+            if cost_cap < 0:
+                add(("spend_cap", f"{cost_raw} is negative (blocks all work; "
+                                  "use 0 or unset to disable)", "fail"))
+    jobs_raw = os.environ.get("LOCUM_MAX_JOBS_PER_DAY", "")
+    if jobs_raw.strip():
+        try:
+            jobs_cap = int(jobs_raw)
+        except ValueError:
+            add(("job_cap", f"LOCUM_MAX_JOBS_PER_DAY={jobs_raw!r} is not an integer",
+                 "fail"))
+        else:
+            if jobs_cap < 0:
+                add(("job_cap", f"{jobs_raw} is negative (blocks all work; "
+                                "use 0 or unset to disable)", "fail"))
+
     shorts = {"LOCUM_JOB_TIMEOUT": "timeout", "LOCUM_MAX_CONCURRENT": "concurrency",
               "LOCUM_MAX_JOBS": "max_jobs", "LOCUM_MAX_EVENTS": "max_events"}
     defaults = {"LOCUM_JOB_TIMEOUT": "1800", "LOCUM_MAX_CONCURRENT": "2",
@@ -315,6 +338,12 @@ JOBS_FILE = Path(os.environ.get("LOCUM_JOBS_FILE",
 # sleep instead of polling. Empty disables it. This is the operator's own
 # routine, not a vendor API, and the payload carries no credentials.
 WEBHOOK_URL = os.environ.get("LOCUM_COMPLETION_WEBHOOK", "").strip()
+# Daily guardrails, measured over the trailing 24h. Zero or unset disables
+# each independently. Cost only counts what the CLIs report, and Codex
+# reports none, so the job cap is the backstop for Codex-heavy use.
+MAX_COST_USD = float(os.environ.get("LOCUM_MAX_COST_USD", "0") or 0)
+MAX_JOBS_PER_DAY = int(os.environ.get("LOCUM_MAX_JOBS_PER_DAY", "0") or 0)
+DAY_SECONDS = 24 * 60 * 60
 
 # One vocabulary across both CLIs, so a caller never has to know which vendor
 # spells it which way. Claude takes --effort low|medium|high|xhigh|max; Codex
@@ -997,6 +1026,36 @@ def _spawn(job: Job, argv: list[str], on_event, finalize=None) -> dict[str, Any]
                      "the work is already queued.",
     }
 
+
+def _usage_24h() -> tuple[float, int]:
+    """Reported spend and jobs started in the trailing 24h. Approximate under
+    extreme burst: pruning evicts the oldest jobs from memory, and with them
+    from this window."""
+    cutoff = time.time() - DAY_SECONDS
+    spent, started = 0.0, 0
+    for job in JOBS.values():
+        if job.started > cutoff:
+            started += 1
+            if isinstance(job.cost_usd, (int, float)):
+                spent += job.cost_usd
+    return spent, started
+
+
+def _check_caps() -> None:
+    """Refuse new work once a guardrail trips. Every entry tool calls this
+    after argument validation, before anything billable happens."""
+    if not MAX_COST_USD and not MAX_JOBS_PER_DAY:
+        return
+    spent, started = _usage_24h()
+    if MAX_COST_USD and spent >= MAX_COST_USD:
+        raise ValueError(
+            f"daily spend cap reached: ${spent:.2f} of ${MAX_COST_USD:.2f} "
+            f"in the trailing 24h; refusing delegation")
+    if MAX_JOBS_PER_DAY and started >= MAX_JOBS_PER_DAY:
+        raise ValueError(
+            f"daily job cap reached: {started} of {MAX_JOBS_PER_DAY} "
+            f"in the trailing 24h; refusing delegation")
+
 # ------------------------------------------------------------------ tools ----
 
 mcp = FastMCP(
@@ -1040,6 +1099,7 @@ async def delegate_to_claude(prompt: str, cwd: str | None = None,
         argv += ["--effort", effort]
     job = Job(id=uuid.uuid4().hex[:12], kind="claude", prompt=prompt,
               cwd=_resolve_cwd(cwd), model=model, effort=effort)
+    _check_caps()
     return _spawn(job, argv, _note_claude_event)
 
 
@@ -1069,6 +1129,7 @@ async def resume_claude(session_id: str, prompt: str, cwd: str | None = None,
     job = Job(id=uuid.uuid4().hex[:12], kind="claude", prompt=prompt,
               cwd=_resolve_cwd(cwd), model=model, effort=effort)
     job.session_id = session_id
+    _check_caps()
     return _spawn(job, argv, _note_claude_event)
 
 
@@ -1089,6 +1150,7 @@ async def delegate_to_codex(prompt: str, cwd: str | None = None,
     """
     effort = _effort(effort)
     resolved = _resolve_cwd(cwd)
+    _check_caps()
     outfile = Path(resolved) / f".codex-last-{uuid.uuid4().hex[:8]}.txt"
     argv = [_require("codex"), "exec", prompt, "--json",
             "--cd", resolved, "--skip-git-repo-check",
@@ -1155,6 +1217,7 @@ async def resume_codex(session_id: str, prompt: str, cwd: str | None = None,
     """
     effort = _effort(effort)
     resolved = _resolve_cwd(cwd)
+    _check_caps()
     outfile = Path(resolved) / f".codex-last-{uuid.uuid4().hex[:8]}.txt"
     # `codex exec resume` takes [SESSION_ID] [PROMPT] positionally and accepts
     # no --cd, so the working directory comes from the subprocess cwd alone.
@@ -1246,13 +1309,14 @@ async def cancel_job(job_id: str) -> dict:
 @mcp.tool
 async def status() -> dict:
     """Health and capacity of this server. Call it before delegating: it shows
-    the allowed cwd roots, which CLIs are actually on PATH, and how many jobs
-    are running or queued with how many slots free. Discovering \"claude is
-    not installed\" or \"cwd is outside the roots\" here beats discovering it
-    by failing a delegation.
+    the allowed cwd roots, which CLIs are actually on PATH, how many jobs
+    are running or queued with how many slots free, and spend-cap use so far.
+    Discovering \"claude is not installed\" or \"cwd is outside the roots\"
+    here beats discovering it by failing a delegation.
     """
     running = sum(1 for j in JOBS.values() if j.status == "running")
     queued = sum(1 for j in JOBS.values() if j.status == "queued")
+    spent, started = _usage_24h()
     return {
         "roots": [str(r) for r in ROOTS],
         "binaries": {"claude": shutil.which("claude"),
@@ -1261,6 +1325,10 @@ async def status() -> dict:
         "queued": queued,
         "free_slots": max(MAX_CONCURRENT - running, 0),
         "max_concurrent": MAX_CONCURRENT,
+        "budget": {"max_cost_usd": MAX_COST_USD or None,
+                   "spent_24h": round(spent, 4),
+                   "max_jobs_per_day": MAX_JOBS_PER_DAY or None,
+                   "started_24h": started},
     }
 
 # ------------------------------------------------------------------- auth ----

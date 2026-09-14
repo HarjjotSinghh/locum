@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Daily spend and volume guardrails: `LOCUM_MAX_COST_USD` and
+  `LOCUM_MAX_JOBS_PER_DAY`, each measured over the trailing 24h and each
+  disabled when unset. Tripping one refuses new delegations (fresh and
+  resume alike) with a clear error, and `status` reports use so far. Cost
+  only counts what the CLIs report and Codex reports none, so the job cap
+  is the backstop; `--doctor` validates both knobs.
 - `server.py --doctor`: a setup self-check covering the token, roots, both
   CLIs with versions, the port, the journal, the webhook URL, the numeric
   knobs, and the launchd agent on macOS. It reads the environment directly
