@@ -755,7 +755,10 @@ os.chmod(pathlib.Path(_docbin) / "codex", 0o755)
 
 
 def _in_env(fn, **kw):
-    """Run fn with LOCUM_* cleared and kw applied. Restores everything."""
+    """Run fn with LOCUM_* cleared and kw applied. Restores everything. The
+    journal defaults to a temp path so no test can depend on (or read) the
+    operator's real history; journal tests override it explicitly."""
+    kw.setdefault("LOCUM_JOBS_FILE", str(pathlib.Path(_docbin) / "jobs.jsonl"))
     saved = dict(os.environ)
     try:
         for k in [k for k in os.environ if k.startswith("LOCUM_")]:
@@ -853,6 +856,7 @@ else:
 
 
 def _doctor_cli(**kw):
+    kw.setdefault("LOCUM_JOBS_FILE", str(pathlib.Path(_jd) / "cli.jsonl"))
     env = dict(os.environ)
     for k in [k for k in env if k.startswith("LOCUM_")]:
         del env[k]
